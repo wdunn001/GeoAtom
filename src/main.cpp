@@ -195,6 +195,14 @@ const char* KEY_HMC_X_SCALE = "hmcXScale"; // Key for HMC X scale
 const char* KEY_HMC_Y_SCALE = "hmcYScale"; // Key for HMC Y scale
 const char* KEY_HMC_Z_SCALE = "hmcZScale"; // Key for HMC Z scale
 
+// Add these configuration flags near the other configuration flags
+bool useM5StackSmoothing = false;      // Whether to use M5Stack's built-in smoothing
+bool useM5StackInterference = false;    // Whether to use M5Stack's built-in magnetic interference detection
+
+// Add these configuration keys with the other preference keys
+const char* KEY_USE_M5_SMOOTHING = "useM5Smooth";     // Key for M5Stack smoothing preference
+const char* KEY_USE_M5_INTERFERENCE = "useM5Interf";  // Key for M5Stack interference preference
+
 // Pin definitions based on physical connections
 // --- Verified Working Configuration for BN-880 & M5Atom Echo ---
 // I2C pins - shared between compass (BN-880) and display (SSD1306)
@@ -542,18 +550,18 @@ void setup() {
   // Initialize preferences
   preferences.begin(PREF_NAMESPACE, true); // Open read-only
   
-  // Load interference mitigation settings
-  enableOutlierRejection = preferences.getBool(KEY_OUTLIER_REJECTION, false);
-  enableNoiseThreshold = preferences.getBool(KEY_NOISE_THRESHOLD, false);
-  enableGpsFusion = preferences.getBool(KEY_GPS_FUSION, false);
-  enableMagneticInterference = preferences.getBool(KEY_MAG_INTERFERENCE, false);
+  // Load interference mitigation settings - initialize all to false
+  enableOutlierRejection = false;
+  enableNoiseThreshold = false;
+  enableGpsFusion = false;
+  enableMagneticInterference = false;
   
-  // Load interference thresholds
+  // Load interference thresholds but keep algorithms disabled
   MAX_HEADING_JUMP = preferences.getInt("maxHeadingJump", 0);
   HEADING_NOISE_THRESHOLD = preferences.getInt("headingNoiseThresh", 0);
   MAGNETIC_VARIANCE_THRESHOLD = preferences.getFloat("magVarThresh", 0.0f);
   
-  // Load smoothing parameters
+  // Load smoothing parameters but keep algorithms disabled
   ALPHA = preferences.getFloat("compassAlpha", 0.0f);
   COMPASS_XYZ_ALPHA = preferences.getFloat("compassXYZAlpha", 0.0f);
   
@@ -680,6 +688,13 @@ void setup() {
       logMessage("NOTE: HMC compass can be calibrated but requires declination setting");
     }
   }
+
+  // In setup(), after loading other preferences:
+  // ... existing code ...
+  preferences.begin(PREF_NAMESPACE, true);
+  useM5StackSmoothing = preferences.getBool(KEY_USE_M5_SMOOTHING, false);
+  useM5StackInterference = preferences.getBool(KEY_USE_M5_INTERFERENCE, false);
+  preferences.end();
 }
 
 void loop() {
@@ -733,12 +748,16 @@ void loop() {
   UIState currentState = determineCurrentUIState();
   auto handlers = buttonHandlerMap[currentState];
 
-  if (M5.BtnA.wasPressed()) {
+  // Configure button timing
+  M5.BtnA.setHoldThresh(800);  // Set long press threshold to 800ms
+
+  // Execute handlers based on button state
+  if (M5.BtnA.wasReleased()) {  // Short press executes on key up
     if (handlers.shortPressHandler) {
       handlers.shortPressHandler();
     }
   }
-  else if (M5.BtnA.wasHold()) {
+  else if (M5.BtnA.wasHold()) {  // Long press executes after hold threshold
     if (handlers.longPressHandler) {
       handlers.longPressHandler();
     }
