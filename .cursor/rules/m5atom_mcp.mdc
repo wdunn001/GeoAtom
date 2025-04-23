@@ -1,1 +1,83 @@
- 
+# M5Atom Echo GPS Development Guidelines
+
+## Model Context Protocol Directives
+
+- When reviewing code, first understand the hardware limitations of the M5Atom Echo
+- Always consider the limited GPIO availability on the M5Atom Echo platform
+- When suggesting changes, ensure they are compatible with ESP32-PICO-D4 hardware
+- For Serial communication, remember that M5Atom Echo has USB CDC serial issues requiring special configuration
+
+## Serial Communication Guidelines
+
+- Always use `serial_baudrate = 0` in M5.config() to disable default serial initialization
+- Use these build flags for proper USB CDC operation:
+  ```
+  -D ARDUINO_USB_MODE=1
+  -D ARDUINO_USB_CDC_ON_BOOT=1
+  -D DISABLE_SERIAL=1
+  -D DISABLE_SERIALEVENT=1
+  ```
+- For GPS module communication, use the separate UART interfaces:
+  ```cpp
+  // GPS module connections
+  #define GPS_RX 22  // ESP32 RX pin connected to GPS TX
+  #define GPS_TX 19  // ESP32 TX pin connected to GPS RX
+  HardwareSerial GPS(1);  // Using UART1 for GPS
+  GPS.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
+  ```
+- For TTL converter/host communication:
+  ```cpp
+  // TTL to RS232 level converter connections
+  #define HOST_RX 21  // ESP32 RX pin connected to TTL TX
+  #define HOST_TX 25  // ESP32 TX pin connected to TTL RX
+  HardwareSerial Host(2);  // Using UART2 for host communication
+  Host.begin(9600, SERIAL_8N1, HOST_RX, HOST_TX);
+  ```
+
+## Pin Assignment Standards
+
+- Use predefined constant names for pins:
+  ```cpp
+  // I2C pins - shared between compass and display
+  #define I2C_SDA 26
+  #define I2C_SCL 32
+  
+  // GPS module connections
+  #define GPS_RX 22  // ESP32 RX pin connected to GPS TX
+  #define GPS_TX 19  // ESP32 TX pin connected to GPS RX
+  
+  // TTL to RS232 level converter connections
+  #define HOST_RX 21  // ESP32 RX pin connected to TTL TX
+  #define HOST_TX 25  // ESP32 TX pin connected to TTL RX
+  ```
+
+## I2C Communication
+
+- Initialize I2C before initializing any I2C devices:
+  ```cpp
+  // Initialize I2C for shared compass and display use
+  Wire.begin(I2C_SDA, I2C_SCL);
+  ```
+- Remember that I2C bus is shared between the compass and the display
+- Keep I2C commands efficient to avoid blocking the bus
+
+## Library Configuration
+
+- For M5Unified version 0.2.5:
+  - Initialize with custom configuration to avoid Serial issues
+  - Use display and audio functions through the M5 interface
+
+## Coding Style
+
+- Use 2-space indentation
+- Use snake_case for variable and function names
+- Prefer constants over magic numbers
+- Add descriptive comments for hardware-specific code
+- Document pin assignments clearly
+
+## Project Structure
+
+- src/ - Application code
+- lib/ - Custom libraries
+- .cursor/ - Cursor configuration 
+- platformio.ini - PlatformIO configuration 

@@ -270,12 +270,12 @@ void setDeclinationFromGPS(float lat, float lng) {
 
 // Add these declarations with other global variables
 float smoothedHeading = 0.0f;  // Smoothed compass heading
-const float ALPHA = 0.15f;     // Smoothing factor (0.0-1.0): lower = more smoothing, higher = more responsive
+float ALPHA = 0.0f;     // Smoothing factor (0.0-1.0): lower = more smoothing, higher = more responsive
 // Compass raw value smoothing
 int smoothedCompassX = 0;      // Smoothed compass X value
 int smoothedCompassY = 0;      // Smoothed compass Y value 
 int smoothedCompassZ = 0;      // Smoothed compass Z value
-const float COMPASS_XYZ_ALPHA = 0.2f; // Smoothing factor for raw compass values
+float COMPASS_XYZ_ALPHA = 0.0f; // Smoothing factor for raw compass values
 bool compassValuesInitialized = false; // Flag to initialize compass values
 bool compassStabilized = false; // Flag to indicate compass has stabilized after startup
 unsigned long compassStartupTime = 0; // Timestamp when compass initialization started
@@ -453,16 +453,16 @@ unsigned long lastCompassDebugOutput = 0; // Timestamp for last compass debug ou
 
 // Compass interference mitigation
 // Configuration flags - these can be toggled in settings
-bool enableOutlierRejection = true;      // Reject sudden large jumps in heading
-bool enableNoiseThreshold = true;        // Ignore small changes below threshold
-bool enableGpsFusion = true;             // Blend GPS course when moving
-bool enableMagneticInterference = true;  // Detect and compensate for interference
+bool enableOutlierRejection = false;      // Reject sudden large jumps in heading
+bool enableNoiseThreshold = false;        // Ignore small changes below threshold
+bool enableGpsFusion = false;             // Blend GPS course when moving
+bool enableMagneticInterference = false;  // Detect and compensate for interference
 
 // Constants for interference mitigation
-const int MAX_HEADING_JUMP = 60;           // Increased from 30 to 60 degrees - Maximum allowed heading change in degrees per reading
-const int HEADING_NOISE_THRESHOLD = 3;     // Degrees - changes smaller than this are ignored
-const float MIN_GPS_CONFIDENCE = 0.7;      // Minimum confidence to start using GPS course
-const float MAGNETIC_VARIANCE_THRESHOLD = 2000.0; // Threshold for magnetic field variance indicating interference
+int MAX_HEADING_JUMP = 0;           // Maximum allowed heading change in degrees per reading
+int HEADING_NOISE_THRESHOLD = 0;    // Degrees - changes smaller than this are ignored
+float MIN_GPS_CONFIDENCE = 0.0;     // Minimum confidence to start using GPS course
+float MAGNETIC_VARIANCE_THRESHOLD = 0.0; // Threshold for magnetic field variance indicating interference
 
 // Runtime variables for interference detection
 bool lastHeadingValid = false;             // Flag for first reading
@@ -490,25 +490,14 @@ const float GPS_SPEED_MAX = 20.0f; // Speed at which to use max course alpha
 const unsigned long COMPASS_SAMPLE_INTERVAL = 10;   // Sample compass at 100Hz (10ms)
 const unsigned long DISPLAY_UPDATE_INTERVAL = 33;   // Update display at 30Hz (33ms)
 
-// Forward declarations for handler functions
+// Function prototypes
 void handleShortPressGPSStatus();
 void handleLongPressGPSStatus();
 void handleShortPressCompassStatus();
 void handleLongPressCompassStatus();
 void handleShortPressGraphicCompass();
 void handleLongPressGraphicCompass();
-void handleShortPressWorldMap();
-void handleLongPressWorldMap();
-void handleShortPressAltitudeCorrection();
-void handleLongPressAltitudeCorrection();
-void handleShortPressCalibrationModeSelection();
-void handleLongPressCalibrationModeSelection();
-void handleShortPressCalibrating();
-void handleLongPressCalibrating();
-void handleShortPressDeclination();
-void handleLongPressDeclination();
-void handleShortPressInversion();
-void handleLongPressInversion();
+void scanI2CDevices();
 
 // Define a type for button handler functions for clarity
 typedef void (*ButtonHandlerFunc)();
@@ -526,243 +515,153 @@ void setup() {
   delay(1000);  // Give peripherals time to initialize
   
   // Initialize the button handler map
-  buttonHandlerMap[UIState::GPS_STATUS_SCREEN] = {handleShortPressGPSStatus, handleLongPressGPSStatus};
-  buttonHandlerMap[UIState::COMPASS_STATUS_SCREEN] = {handleShortPressCompassStatus, handleLongPressCompassStatus};
-  buttonHandlerMap[UIState::GRAPHIC_COMPASS_SCREEN] = {handleShortPressGraphicCompass, handleLongPressGraphicCompass};
-  buttonHandlerMap[UIState::WORLD_MAP_SCREEN] = {handleShortPressWorldMap, handleLongPressWorldMap};
-  buttonHandlerMap[UIState::ALTITUDE_CORRECTION_MODE] = {handleShortPressAltitudeCorrection, handleLongPressAltitudeCorrection};
-  buttonHandlerMap[UIState::CALIBRATION_MODE_SELECTION] = {handleShortPressCalibrationModeSelection, handleLongPressCalibrationModeSelection};
-  buttonHandlerMap[UIState::CALIBRATING_COMPASS] = {handleShortPressCalibrating, handleLongPressCalibrating};
-  buttonHandlerMap[UIState::SETTING_DECLINATION] = {handleShortPressDeclination, handleLongPressDeclination};
-  buttonHandlerMap[UIState::SETTING_INVERSION] = {handleShortPressInversion, handleLongPressInversion};
+  buttonHandlerMap[UIState::GPS_STATUS_SCREEN] = ButtonHandlers{handleShortPressGPSStatus, handleLongPressGPSStatus};
+  buttonHandlerMap[UIState::COMPASS_STATUS_SCREEN] = ButtonHandlers{handleShortPressCompassStatus, handleLongPressCompassStatus};
+  buttonHandlerMap[UIState::GRAPHIC_COMPASS_SCREEN] = ButtonHandlers{handleShortPressGraphicCompass, handleLongPressGraphicCompass};
+  buttonHandlerMap[UIState::WORLD_MAP_SCREEN] = ButtonHandlers{handleShortPressWorldMap, handleLongPressWorldMap};
+  buttonHandlerMap[UIState::ALTITUDE_CORRECTION_MODE] = ButtonHandlers{handleShortPressAltitudeCorrection, handleLongPressAltitudeCorrection};
+  buttonHandlerMap[UIState::CALIBRATION_MODE_SELECTION] = ButtonHandlers{handleShortPressCalibrationModeSelection, handleLongPressCalibrationModeSelection};
+  buttonHandlerMap[UIState::CALIBRATING_COMPASS] = ButtonHandlers{handleShortPressCalibrating, handleLongPressCalibrating};
+  buttonHandlerMap[UIState::SETTING_DECLINATION] = ButtonHandlers{handleShortPressDeclination, handleLongPressDeclination};
+  buttonHandlerMap[UIState::SETTING_INVERSION] = ButtonHandlers{handleShortPressInversion, handleLongPressInversion};
   
-  // Initialize I2C with appropriate frequency for reliable operation
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);  // 100kHz is more reliable than the default 400kHz
-  
-  // Initialize M5 hardware with custom config for Atom Echo
+  // Initialize M5 hardware
   auto cfg = M5.config();
-  cfg.serial_baudrate = 0;  // Disable serial init in M5Unified completely
+  cfg.serial_baudrate = 0; // Disable serial
   M5.begin(cfg);
   
-  // Initialize serial communications
-  // --- Start with the default/known working baud rate for initial communication ---
-  gpsBaudRate = 9600; // Store GPS baud rate
-  GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX); 
-  Host.begin(115200, SERIAL_8N1, HOST_RX, HOST_TX);
+  // Initialize I2C with correct pins
+  Wire.begin(I2C_SDA, I2C_SCL);
   
-  // Output message on the host serial - now using logMessage
-  logMessage("\n\n--- GPS Navigation System ---");
-  logMessage("System initializing...");
-
-  // --- Configure GPS Module --- 
-  logMessage("Configuring GPS module...");
-  delay(300); // Wait for GPS module to be ready for commands
-  GPSConfigurator gpsConfig(GPS);
-
-  // First set baud rate to 9600
-  if (gpsConfig.setBaudRate(9600)) {
-      logMessage("GPS: Set baud rate to 9600.");
+  // Initialize GPS serial
+  GPS.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
+  
+  // Initialize Host serial (for debugging)
+  Host.begin(9600, SERIAL_8N1, HOST_RX, HOST_TX);
+  
+  // Initialize preferences
+  preferences.begin(PREF_NAMESPACE, true); // Open read-only
+  
+  // Load interference mitigation settings
+  enableOutlierRejection = preferences.getBool(KEY_OUTLIER_REJECTION, false);
+  enableNoiseThreshold = preferences.getBool(KEY_NOISE_THRESHOLD, false);
+  enableGpsFusion = preferences.getBool(KEY_GPS_FUSION, false);
+  enableMagneticInterference = preferences.getBool(KEY_MAG_INTERFERENCE, false);
+  
+  // Load interference thresholds
+  MAX_HEADING_JUMP = preferences.getInt("maxHeadingJump", 0);
+  HEADING_NOISE_THRESHOLD = preferences.getInt("headingNoiseThresh", 0);
+  MAGNETIC_VARIANCE_THRESHOLD = preferences.getFloat("magVarThresh", 0.0f);
+  
+  // Load smoothing parameters
+  ALPHA = preferences.getFloat("compassAlpha", 0.0f);
+  COMPASS_XYZ_ALPHA = preferences.getFloat("compassXYZAlpha", 0.0f);
+  
+  preferences.end();
+  
+  // Initialize display
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    logMessage("SSD1306 allocation failed");
   } else {
-      logMessage("GPS: Failed to set baud rate to 9600.");
-  }
-  delay(100); // Small delay between commands
-
-  // Set Update Rate to 10Hz
-  if (gpsConfig.setUpdateRateHz(10)) {
-      logMessage("GPS: Set update rate to 10 Hz.");
-  } else {
-      logMessage("GPS: Failed to set update rate to 10 Hz.");
-  }
-  delay(100); // Small delay between commands
-
-  // Save configuration to make it persistent
-  if (gpsConfig.saveConfiguration()) {
-      logMessage("GPS: Configuration saved to NVM.");
-  } else {
-      logMessage("GPS: Failed to save configuration.");
-  }
-  delay(100);
-  logMessage("GPS configuration complete.");
-  // --- End GPS Configuration ---
-  
-  // Scan I2C devices to identify what's connected
-  scanI2CDevices(); // Keep original Host prints inside this function for now
-  
-  // --- Initialize Compass with Failover --- 
-  logMessage("Initializing compass (attempt 1: QMC5883L)... ");
-  
-  // Try QMC5883L first
-  if (qmcCompass.begin()) {
-      logMessage("QMC5883L initialized successfully.");
-      activeCompass = &qmcCompass;
-      
-      // Load QMC calibration from preferences
-      preferences.begin(PREF_NAMESPACE, true); // Open NVM in read-only mode
-      bool calValid = preferences.getBool(KEY_CAL_VALID, false);
-      compassInverted = preferences.getBool(KEY_COMPASS_INVERTED, false);
-      
-      if (calValid) {
-          float x_offset = preferences.getFloat(KEY_X_OFFSET, 0.0f);
-          float y_offset = preferences.getFloat(KEY_Y_OFFSET, 0.0f);
-          float z_offset = preferences.getFloat(KEY_Z_OFFSET, 0.0f);
-          float x_scale = preferences.getFloat(KEY_X_SCALE, 1.0f);
-          float y_scale = preferences.getFloat(KEY_Y_SCALE, 1.0f);
-          float z_scale = preferences.getFloat(KEY_Z_SCALE, 1.0f);
-          preferences.end();
-
-          qmcCompass.setCalibrationOffsets(x_offset, y_offset, z_offset);
-          qmcCompass.setCalibrationScales(x_scale, y_scale, z_scale);
-          logMessage("Loaded QMC5883L compass calibration from NVM.");
-      } else {
-          preferences.end();
-          logMessage("No valid QMC5883L calibration in NVM, using defaults.");
-      }
-      
-      // Load altitude correction if it exists (relevant even if QMC fails)
-      preferences.begin(PREF_NAMESPACE, true); // Re-open read-only
-      altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0); // Load correction, default 0
-      preferences.end();
-
-      if (altitudeCorrection != 0) {
-          logMessage("Loaded Altitude Correction: " + String(altitudeCorrection) + "m");
-      }
-      if (compassInverted) {
-          logMessage("Compass display is inverted.");
-      }
-  }
-  else {
-      logMessage("QMC5883L initialization failed, trying HMC5883L...");
-      // Fall back to HMC5883L
-      if (hmcCompass.begin()) {
-          logMessage("HMC5883L initialized successfully.");
-          activeCompass = &hmcCompass;
-          
-          // Load HMC declination, calibration and inversion from preferences
-          preferences.begin(PREF_NAMESPACE, true); // Open NVM in read-only mode
-          currentDeclination = preferences.getFloat(KEY_DECLINATION, 0.0f);
-          compassInverted = preferences.getBool(KEY_COMPASS_INVERTED, false);
-          altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0); // Load correction, default 0
-          bool hmcCalValid = preferences.getBool(KEY_HMC_CAL_VALID, false);
-          
-          // Set declination from saved value
-          hmcCompass.setDeclination(currentDeclination);
-          
-          // Load calibration if available
-          if (hmcCalValid) {
-              float x_offset = preferences.getFloat(KEY_HMC_X_OFFSET, 0.0f);
-              float y_offset = preferences.getFloat(KEY_HMC_Y_OFFSET, 0.0f);
-              float z_offset = preferences.getFloat(KEY_HMC_Z_OFFSET, 0.0f);
-              float x_scale = preferences.getFloat(KEY_HMC_X_SCALE, 1.0f);
-              float y_scale = preferences.getFloat(KEY_HMC_Y_SCALE, 1.0f);
-              float z_scale = preferences.getFloat(KEY_HMC_Z_SCALE, 1.0f);
-              
-              hmcCompass.setCalibrationOffsets(x_offset, y_offset, z_offset);
-              hmcCompass.setCalibrationScales(x_scale, y_scale, z_scale);
-              logMessage("Loaded HMC5883L compass calibration from NVM.");
-          }
-          
-          preferences.end();
-          
-          logMessage("Using HMC5883L with declination: " + String(currentDeclination * 180.0 / PI, 2) + " degrees.");
-          if (altitudeCorrection != 0) {
-              logMessage("Loaded Altitude Correction: " + String(altitudeCorrection) + "m");
-          }
-          if (compassInverted) {
-              logMessage("Compass display is inverted.");
-          }
-      }
-      else {
-          logMessage("*** WARNING: Both compass initialization attempts failed. ***");
-          activeCompass = nullptr;
-          // Still load altitude correction even if no compass works
-           preferences.begin(PREF_NAMESPACE, true); // Re-open read-only
-           altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0); // Load correction, default 0
-           preferences.end();
-            if (altitudeCorrection != 0) {
-              logMessage("Loaded Altitude Correction: " + String(altitudeCorrection) + "m");
-          }
-      }
-  }
-  
-  logMessage("Compass setup complete."); 
-  
-  // Initialize SSD1306 OLED display with better error handling
-  logMessage("Initializing display..."); // Use logMessage
-  
-  // Try multiple initialization attempts - in case of power-up issues
-  for (int attempt = 0; attempt < 3; attempt++) {
-    // Try the most common address (0x3C)
-    if(display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-      logMessage("Display initialized at address 0x3C"); // Use logMessage
-      display_initialized = true;
-      break;
-    } 
-    // Try alternative address (0x3D)
-    else if(display.begin(SSD1306_SWITCHCAPVCC, 0x3D)) {
-      logMessage("Display initialized at address 0x3D"); // Use logMessage
-      display_initialized = true;
-      break;
-    }
-    else {
-      // Keep original Host.print/println for this dynamic message
-      Host.print("Display init attempt "); 
-      Host.print(attempt + 1);
-      Host.println(" failed, retrying...");
-      delay(100);  // Short delay before retry
-    }
-  }
-  
-  if (!display_initialized) {
-    logMessage("*** WARNING: Could not initialize SSD1306 display"); // Use logMessage
-    logMessage("*** Check connections and I2C address"); // Use logMessage
-  }
-  
-  // If display initialized, show welcome message (No logging needed here, it's on OLED)
-  if (display_initialized) {
+    display_initialized = true;
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
-    display.println("GPS Navigation");
-    display.println("-------------");
     display.println("Initializing...");
-    display.println("Waiting for GPS");
     display.display();
   }
   
-  // Send final setup information - use logMessage
-  logMessage("\nSystem initialization complete");
-  logMessage("I2C: SDA=26, SCL=32 (Grove Port A)");
-  logMessage("GPS (BN-880 UART): RX=25, TX=21 @ " + String(gpsBaudRate));
-  logMessage("Host (TTL UART): RX=33, TX=23 @ 115200");
-  logMessage("Waiting for GPS data...");
-  
-  // Load interference mitigation settings
-  preferences.begin(PREF_NAMESPACE, true); // Open read-only
-  enableOutlierRejection = preferences.getBool(KEY_OUTLIER_REJECTION, true);
-  enableNoiseThreshold = preferences.getBool(KEY_NOISE_THRESHOLD, true);
-  enableGpsFusion = preferences.getBool(KEY_GPS_FUSION, true);
-  enableMagneticInterference = preferences.getBool(KEY_MAG_INTERFERENCE, true);
-  preferences.end();
-  
-  logMessage("Compass interference mitigation settings:");
-  logMessage(" - Outlier rejection: " + String(enableOutlierRejection ? "ON" : "OFF"));
-  logMessage(" - Noise threshold: " + String(enableNoiseThreshold ? "ON" : "OFF"));
-  logMessage(" - GPS fusion: " + String(enableGpsFusion ? "ON" : "OFF"));
-  logMessage(" - Magnetic interference: " + String(enableMagneticInterference ? "ON" : "OFF"));
-  
-  if (activeCompass != nullptr) {
-    // Take initial readings to stabilize compass
-    logMessage("Initializing compass readings...");
-    compassStartupTime = millis();
+  // Try to initialize QMC5883L first
+  if (qmcCompass.begin()) {
+    logMessage("QMC5883L initialized successfully.");
+    activeCompass = &qmcCompass;
     
-    // Take multiple readings to stabilize the sensor
-    for (int i = 0; i < 10; i++) {
-      activeCompass->read();
-      delay(50);
+    // Load calibration from preferences
+    preferences.begin(PREF_NAMESPACE, true); // Open read-only
+    bool calValid = preferences.getBool(KEY_CAL_VALID, false);
+    
+    if (calValid) {
+      float x_offset = preferences.getFloat(KEY_X_OFFSET, 0.0f);
+      float y_offset = preferences.getFloat(KEY_Y_OFFSET, 0.0f);
+      float z_offset = preferences.getFloat(KEY_Z_OFFSET, 0.0f);
+      float x_scale = preferences.getFloat(KEY_X_SCALE, 1.0f);
+      float y_scale = preferences.getFloat(KEY_Y_SCALE, 1.0f);
+      float z_scale = preferences.getFloat(KEY_Z_SCALE, 1.0f);
+      preferences.end();
+
+      qmcCompass.setCalibrationOffsets(x_offset, y_offset, z_offset);
+      qmcCompass.setCalibrationScales(x_scale, y_scale, z_scale);
+      logMessage("Loaded QMC5883L compass calibration from NVM.");
+    } else {
+      preferences.end();
+      logMessage("No valid QMC5883L calibration in NVM, using defaults.");
     }
     
+    // Load altitude correction if it exists (relevant even if QMC fails)
+    preferences.begin(PREF_NAMESPACE, true); // Re-open read-only
+    altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0); // Load correction, default 0
+    preferences.end();
+
+    if (altitudeCorrection != 0) {
+      logMessage("Loaded Altitude Correction: " + String(altitudeCorrection) + "m");
+    }
+    if (compassInverted) {
+      logMessage("Compass display is inverted.");
+    }
+  }
+  else {
+    logMessage("QMC5883L initialization failed, trying HMC5883L...");
+    // Fall back to HMC5883L
+    if (hmcCompass.begin()) {
+      logMessage("HMC5883L initialized successfully.");
+      activeCompass = &hmcCompass;
+      
+      // Load HMC declination, calibration and inversion from preferences
+      preferences.begin(PREF_NAMESPACE, true); // Open NVM in read-only mode
+      currentDeclination = preferences.getFloat(KEY_DECLINATION, 0.0f);
+      altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0); // Load correction, default 0
+      bool hmcCalValid = preferences.getBool(KEY_HMC_CAL_VALID, false);
+      
+      // Set declination from saved value
+      hmcCompass.setDeclination(currentDeclination);
+      
+      // Load calibration if available
+      if (hmcCalValid) {
+        float x_offset = preferences.getFloat(KEY_HMC_X_OFFSET, 0.0f);
+        float y_offset = preferences.getFloat(KEY_HMC_Y_OFFSET, 0.0f);
+        float z_offset = preferences.getFloat(KEY_HMC_Z_OFFSET, 0.0f);
+        float x_scale = preferences.getFloat(KEY_HMC_X_SCALE, 1.0f);
+        float y_scale = preferences.getFloat(KEY_HMC_Y_SCALE, 1.0f);
+        float z_scale = preferences.getFloat(KEY_HMC_Z_SCALE, 1.0f);
+        
+        hmcCompass.setCalibrationOffsets(x_offset, y_offset, z_offset);
+        hmcCompass.setCalibrationScales(x_scale, y_scale, z_scale);
+        logMessage("Loaded HMC5883L compass calibration from NVM.");
+      }
+      
+      preferences.end();
+      
+      logMessage("Using HMC5883L with declination: " + String(currentDeclination * 180.0 / PI, 2) + " degrees.");
+      if (altitudeCorrection != 0) {
+        logMessage("Loaded Altitude Correction: " + String(altitudeCorrection) + "m");
+      }
+      if (compassInverted) {
+        logMessage("Compass display is inverted.");
+      }
+    }
+    else {
+      logMessage("*** WARNING: Both compass initialization attempts failed. ***");
+      activeCompass = nullptr;
+      // Still load altitude correction even if no compass works
+      preferences.begin(PREF_NAMESPACE, true); // Re-open read-only
+      altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0); // Load correction, default 0
+      preferences.end();
+    }
+  }
+  
+  // If we have a working compass, read initial heading
+  if (activeCompass) {
     // Read raw heading directly from compass (avoid smoothing during initial read)
     int initialHeading = activeCompass->getAzimuth();
     
@@ -884,6 +783,42 @@ void handleShortPressCalibrating() {
         if (activeCompass->calculateCalibration(calX, calY)) {
           logMessage("Calibration calculated and applied successfully.");
           
+          // Calculate noise and interference characteristics from calibration data
+          float x_variance = 0.0f;
+          float y_variance = 0.0f;
+          float x_mean = 0.0f;
+          float y_mean = 0.0f;
+          
+          // Calculate mean
+          for (int i = 0; i < calibrationPoints; i++) {
+            x_mean += calX[i];
+            y_mean += calY[i];
+          }
+          x_mean /= calibrationPoints;
+          y_mean /= calibrationPoints;
+          
+          // Calculate variance
+          for (int i = 0; i < calibrationPoints; i++) {
+            x_variance += (calX[i] - x_mean) * (calX[i] - x_mean);
+            y_variance += (calY[i] - y_mean) * (calY[i] - y_mean);
+          }
+          x_variance /= calibrationPoints;
+          y_variance /= calibrationPoints;
+          
+          // Set interference parameters based on calibration data
+          enableOutlierRejection = true;
+          enableNoiseThreshold = true;
+          enableMagneticInterference = true;
+          
+          // Calculate thresholds based on variance
+          MAX_HEADING_JUMP = (int)(sqrt(x_variance + y_variance) * 2.0f);
+          HEADING_NOISE_THRESHOLD = (int)(sqrt(x_variance + y_variance) * 0.5f);
+          MAGNETIC_VARIANCE_THRESHOLD = (x_variance + y_variance) * 2.0f;
+          
+          // Set smoothing based on noise characteristics
+          ALPHA = 0.2f; // Moderate smoothing
+          COMPASS_XYZ_ALPHA = 0.2f;
+          
           // Save to NVM based on compass type
           preferences.begin(PREF_NAMESPACE, false);
           
@@ -924,11 +859,16 @@ void handleShortPressCalibrating() {
             preferences.putFloat(KEY_Y_SCALE, y_scale);
             preferences.putFloat(KEY_Z_SCALE, z_scale);
             
-            // Also save interference mitigation settings
+            // Save interference mitigation settings
             preferences.putBool(KEY_OUTLIER_REJECTION, enableOutlierRejection);
             preferences.putBool(KEY_NOISE_THRESHOLD, enableNoiseThreshold);
             preferences.putBool(KEY_GPS_FUSION, enableGpsFusion);
             preferences.putBool(KEY_MAG_INTERFERENCE, enableMagneticInterference);
+            preferences.putInt("maxHeadingJump", MAX_HEADING_JUMP);
+            preferences.putInt("headingNoiseThresh", HEADING_NOISE_THRESHOLD);
+            preferences.putFloat("magVarThresh", MAGNETIC_VARIANCE_THRESHOLD);
+            preferences.putFloat("compassAlpha", ALPHA);
+            preferences.putFloat("compassXYZAlpha", COMPASS_XYZ_ALPHA);
             
             logMessage("QMC5883L calibration and interference settings saved.");
           } 
@@ -967,11 +907,16 @@ void handleShortPressCalibrating() {
             preferences.putFloat(KEY_HMC_Y_SCALE, y_scale);
             preferences.putFloat(KEY_HMC_Z_SCALE, z_scale);
             
-            // Also save interference mitigation settings (these apply to both compass types)
+            // Save interference mitigation settings
             preferences.putBool(KEY_OUTLIER_REJECTION, enableOutlierRejection);
             preferences.putBool(KEY_NOISE_THRESHOLD, enableNoiseThreshold);
             preferences.putBool(KEY_GPS_FUSION, enableGpsFusion);
             preferences.putBool(KEY_MAG_INTERFERENCE, enableMagneticInterference);
+            preferences.putInt("maxHeadingJump", MAX_HEADING_JUMP);
+            preferences.putInt("headingNoiseThresh", HEADING_NOISE_THRESHOLD);
+            preferences.putFloat("magVarThresh", MAGNETIC_VARIANCE_THRESHOLD);
+            preferences.putFloat("compassAlpha", ALPHA);
+            preferences.putFloat("compassXYZAlpha", COMPASS_XYZ_ALPHA);
             
             logMessage("HMC5883L calibration and interference settings saved.");
           }
@@ -990,6 +935,11 @@ void handleShortPressCalibrating() {
           logMessage(" - Noise threshold: " + String(enableNoiseThreshold ? "ON" : "OFF"));
           logMessage(" - GPS fusion: " + String(enableGpsFusion ? "ON" : "OFF"));
           logMessage(" - Magnetic interference: " + String(enableMagneticInterference ? "ON" : "OFF"));
+          logMessage(" - Max heading jump: " + String(MAX_HEADING_JUMP) + " degrees");
+          logMessage(" - Noise threshold: " + String(HEADING_NOISE_THRESHOLD) + " degrees");
+          logMessage(" - Magnetic variance threshold: " + String(MAGNETIC_VARIANCE_THRESHOLD));
+          logMessage(" - Compass smoothing alpha: " + String(ALPHA, 2));
+          logMessage(" - Compass XYZ smoothing alpha: " + String(COMPASS_XYZ_ALPHA, 2));
         } else {
           logMessage("Calibration calculation failed. Try again.");
           isCalibrating = false;
@@ -1083,5 +1033,77 @@ void handleLongPressInversion() {
   
   logMessage("Compass display set to inverted mode");
   isSettingInversion = false;
+}
+
+// Button handler implementations
+void handleShortPressGPSStatus() {
+  // Switch to next screen
+  currentDisplayMode = DisplayMode::COMPASS_STATUS;
+  logMessage("Display mode changed to: COMPASS_STATUS");
+}
+
+void handleLongPressGPSStatus() {
+  // Toggle privacy mode
+  privacyModeEnabled = !privacyModeEnabled;
+  preferences.putBool(KEY_COMPASS_INVERTED, privacyModeEnabled);
+  
+  // Immediately apply privacy filter to update displayed coordinates
+  if (gps.location.isValid()) {
+    applyPrivacyFilter();
+  }
+  
+  // Clearly log that this is GPS coordinate privacy
+  if (privacyModeEnabled) {
+    logMessage("GPS PRIVACY MODE ENABLED - Coordinates will be masked");
+  } else {
+    logMessage("GPS PRIVACY MODE DISABLED - Showing actual coordinates");
+  }
+}
+
+void handleShortPressCompassStatus() {
+  // Switch to next screen
+  currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
+  logMessage("Display mode changed to: GRAPHIC_COMPASS");
+}
+
+void handleLongPressCompassStatus() {
+  // Toggle compass calibration mode
+  isCalibrating = !isCalibrating;
+}
+
+void handleShortPressGraphicCompass() {
+  // Switch to next screen
+  currentDisplayMode = DisplayMode::WORLD_MAP;
+  logMessage("Display mode changed to: WORLD_MAP");
+}
+
+void handleLongPressGraphicCompass() {
+  // Toggle compass inversion
+  compassInverted = !compassInverted;
+  preferences.putBool(KEY_COMPASS_INVERTED, compassInverted);
+}
+
+void scanI2CDevices() {
+  byte error, address;
+  int nDevices = 0;
+  
+  logMessage("Scanning I2C bus...");
+  
+  for(address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+    
+    if (error == 0) {
+      String msg = "I2C device found at address 0x";
+      if (address < 16) msg += "0";
+      msg += String(address, HEX);
+      logMessage(msg);
+      nDevices++;
+    }
+  }
+  
+  if (nDevices == 0) {
+    logMessage("No I2C devices found");
+  }
 }
  
