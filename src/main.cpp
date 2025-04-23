@@ -574,6 +574,7 @@ void setup() {
   preferences.end();
   
   // Initialize display
+  logMessage("Initializing display...");
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     logMessage("SSD1306 allocation failed");
   } else {
@@ -582,6 +583,8 @@ void setup() {
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
+    display.println("GPS Navigation");
+    display.println("-------------");
     display.println("Initializing...");
     display.display();
   }
@@ -796,6 +799,32 @@ void setup() {
     logMessage("*** WARNING: GPS initialization failed after " + String(MAX_GPS_INIT_RETRIES) + " attempts ***");
     logMessage("System will continue but GPS functionality may be limited");
   }
+
+  // After all initialization is complete (at the end of setup()):
+  if (display_initialized) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("System Ready");
+    display.println("-------------");
+    if (gpsInitialized) {
+      display.println("GPS: OK");
+    } else {
+      display.println("GPS: Error");
+    }
+    if (activeCompass != nullptr) {
+      display.println("Compass: " + String(activeCompass->getSensorName()));
+    } else {
+      display.println("Compass: Not Found");
+    }
+    display.display();
+    delay(2000);  // Show status for 2 seconds
+    
+    // Then switch to default display mode
+    currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
+    displayGraphicCompass();  // Show initial compass display
+  }
 }
 
 void loop() {
@@ -807,7 +836,7 @@ void loop() {
     while (GPS.available() > 0) {
       char c = GPS.read();
       gps.encode(c);
-      Host.write(c);  // Forward NMEA data to UART2 (not logged to buffer)
+      Host.write(c);  // Forward NMEA data to UART2
     }
 
     // Apply privacy filter if GPS data was updated
@@ -820,6 +849,10 @@ void loop() {
   static unsigned long lastDisplayUpdate = 0;
   if (millis() - lastDisplayUpdate >= 100) {  // Update display every 100ms
     lastDisplayUpdate = millis();
+
+    if (!display_initialized) {
+      return;
+    }
 
     // Get current heading if compass is available
     int currentHeading = 0;
