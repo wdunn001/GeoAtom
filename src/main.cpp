@@ -519,6 +519,12 @@ struct ButtonHandlers {
 // Create a map from UIState to button handlers
 std::map<UIState, ButtonHandlers> buttonHandlerMap;
 
+// Add these declarations near the top with other variables
+const unsigned long GPS_INIT_TIMEOUT = 5000;  // 5 second timeout for GPS init
+const unsigned long GPS_CONFIG_RETRY_DELAY = 100; // 100ms between retries
+const uint8_t MAX_GPS_INIT_RETRIES = 3;  // Maximum number of initialization attempts
+bool gpsInitialized = false;  // Track if GPS was successfully initialized
+
 void setup() {
   delay(1000);  // Give peripherals time to initialize
   
@@ -695,6 +701,92 @@ void setup() {
   useM5StackSmoothing = preferences.getBool(KEY_USE_M5_SMOOTHING, false);
   useM5StackInterference = preferences.getBool(KEY_USE_M5_INTERFERENCE, false);
   preferences.end();
+
+  // Initialize GPS with validation and retry logic
+  logMessage("Initializing GPS module...");
+  gpsBaudRate = 9600;  // Start with default baud rate
+  
+  uint8_t initAttempts = 0;
+  bool gpsInitSuccess = false;
+  
+  while (!gpsInitSuccess && initAttempts < MAX_GPS_INIT_RETRIES) {
+    initAttempts++;
+    logMessage("GPS init attempt " + String(initAttempts) + " of " + String(MAX_GPS_INIT_RETRIES));
+    
+    // Initialize GPS serial
+    GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
+    
+    // Wait for GPS to be ready
+    unsigned long startTime = millis();
+    bool receivedData = false;
+    
+    while (millis() - startTime < GPS_INIT_TIMEOUT) {
+      if (GPS.available()) {
+        receivedData = true;
+        break;
+      }
+      delay(10);
+    }
+    
+    if (!receivedData) {
+      logMessage("No response from GPS, retrying...");
+      GPS.end();
+      delay(GPS_CONFIG_RETRY_DELAY);
+      continue;
+    }
+    
+    // Configure GPS
+    GPSConfigurator gpsConfig(GPS);
+    bool configSuccess = true;  // Track if all configuration steps succeed
+    
+    // Set update rate to 10Hz
+    if (!gpsConfig.setUpdateRateHz(10)) {
+      logMessage("Failed to set GPS update rate");
+      configSuccess = false;
+    }
+    
+    // Set dynamic model to Portable (0)
+    if (!gpsConfig.setDynamicModel(0)) {
+      logMessage("Failed to set GPS dynamic model");
+      configSuccess = false;
+    }
+    
+    // Enable essential NMEA messages (GGA, RMC, VTG)
+    if (!gpsConfig.enableNmeaMessage(0xF0, 0x00, true) ||  // GGA
+        !gpsConfig.enableNmeaMessage(0xF0, 0x04, true) ||  // RMC
+        !gpsConfig.enableNmeaMessage(0xF0, 0x05, true)) {  // VTG
+      logMessage("Failed to configure NMEA messages");
+      configSuccess = false;
+    }
+    
+    // Save configuration if all steps succeeded
+    if (configSuccess) {
+      if (gpsConfig.saveConfiguration()) {
+        logMessage("GPS configuration saved successfully");
+        gpsInitSuccess = true;
+        break;
+      } else {
+        logMessage("Failed to save GPS configuration");
+      }
+    }
+    
+    // If we get here, configuration failed
+    GPS.end();
+    delay(GPS_CONFIG_RETRY_DELAY);
+  }
+  
+  if (gpsInitSuccess) {
+    gpsInitialized = true;
+    logMessage("GPS initialized successfully");
+    logMessage("GPS Configuration:");
+    logMessage("- Baud Rate: " + String(gpsBaudRate));
+    logMessage("- Update Rate: 10Hz");
+    logMessage("- Dynamic Model: Portable");
+    logMessage("- NMEA Messages: GGA, RMC, VTG");
+  } else {
+    logMessage("*** WARNING: GPS initialization failed after " + String(MAX_GPS_INIT_RETRIES) + " attempts ***");
+    logMessage("System will continue but GPS functionality may be limited");
+  }
 }
 
 void loop() {
@@ -750,17 +842,22 @@ void loop() {
 
   // Configure button timing
   M5.BtnA.setHoldThresh(800);  // Set long press threshold to 800ms
-
-  // Execute handlers based on button state
-  if (M5.BtnA.wasReleased()) {  // Short press executes on key up
-    if (handlers.shortPressHandler) {
-      handlers.shortPressHandler();
-    }
-  }
-  else if (M5.BtnA.wasHold()) {  // Long press executes after hold threshold
+  
+  static bool longPressHandled = false;  // Track if long press was handled in current press cycle
+  
+  // Check for long press first
+  if (M5.BtnA.wasHold()) {
+    longPressHandled = true;  // Mark that we handled a long press
     if (handlers.longPressHandler) {
       handlers.longPressHandler();
     }
+  }
+  // Only handle regular press if no long press occurred
+  else if (M5.BtnA.wasReleased()) {
+    if (!longPressHandled && handlers.shortPressHandler) {  // Only if no long press was handled
+      handlers.shortPressHandler();
+    }
+    longPressHandled = false;  // Reset the flag when button is released
   }
 }
 
@@ -1214,7 +1311,6 @@ void updateDisplay(float lat, float lng, float alt, int heading) {
       display.setCursor(50, 40);
       display.print("Decl:");
       display.print(declDegrees, 1);
-      display.print("\xB0"); // Degree symbol
     }
   } else {
     display.setCursor(0, 40);
@@ -1307,7 +1403,7 @@ void displayLogOnOLED() {
     display.setCursor(0, 48);
     display.print("Course: ");
     display.print(gps.course.deg());
-    display.println("°");
+    display.println(" deg"); // Changed from degree symbol
     
     display.setCursor(0, 56);
     display.print("Speed: ");
@@ -1444,7 +1540,6 @@ void displayCompassLogOnOLED() {
       display.setCursor(68, 14);
       display.print("Hdg:");
       display.print(heading);
-      display.print("\xB0");
     }
     
     display.setCursor(0, SCREEN_HEIGHT - 18);
@@ -1457,6 +1552,7 @@ void displayCompassLogOnOLED() {
     display.print(compassInverted ? "Inverted" : "Normal");
   }
   else {
+    // Normal Compass Status Screen
     String title = "-- Compass Status --";
     int16_t x1, y1;
     uint16_t w, h;
@@ -1465,50 +1561,60 @@ void displayCompassLogOnOLED() {
     display.println(title);
     
     if (activeCompass != nullptr) {
-      display.setCursor(0, 10);
+      // Display compass type on first line
+      display.setCursor(0, 12);
       display.print(activeCompass->getSensorName());
       
+      // Show declination if using HMC5883L on same line
       if (activeCompass == &hmcCompass) {
         float declDegrees = currentDeclination * 180.0 / PI;
         display.print(" Decl:");
         display.print(declDegrees, 1);
-        display.print("\xB0");
       }
       
+      // Display heading on next line
       activeCompass->read();
       int displayHeading = activeCompass->getAzimuth();
       if (compassInverted) {
         displayHeading = (displayHeading + 180) % 360;
       }
       
-      display.setCursor(0, 20);
+      // Move heading and direction to next line
+      display.setCursor(0, 24);
       display.print("Az ");
       display.print(displayHeading);
-      display.print("\xB0 ");
+      display.print(" deg ");
       
       char dirArray[4] = {' ', ' ', ' ', '\0'};
       activeCompass->getDirection(dirArray, displayHeading);
       display.print(dirArray);
       
-      display.setCursor(0, 30);
+      // Raw sensor data with proper spacing
+      display.setCursor(0, 36);
       display.print("X: ");
       display.println(activeCompass->getX());
-      display.setCursor(0, 38);
+      
+      display.setCursor(0, 44);
       display.print("Y: ");
       display.println(activeCompass->getY());
-      display.setCursor(0, 46);
+      
+      display.setCursor(0, 52);
       display.print("Z: ");
       display.println(activeCompass->getZ());
       
+      // Show inversion status at bottom
       if (compassInverted) {
-        display.setCursor(0, 56);
-        display.print("[Inverted]");
+        String invStr = "[Inverted]";
+        display.getTextBounds(invStr, 0, 0, &x1, &y1, &w, &h);
+        display.setCursor(0, SCREEN_HEIGHT - 8);
+        display.print(invStr);
       }
     } else {
-      display.setCursor(0, 20);
+      display.setCursor(0, 24);
       display.println("No compass detected");
     }
     
+    // Add calibration prompt in bottom right if compass is active
     if (activeCompass != nullptr) {
       String calibPrompt = "";
       if (activeCompass == &qmcCompass) {
@@ -1517,6 +1623,7 @@ void displayCompassLogOnOLED() {
         calibPrompt = "Decl: Hold";
       }
       
+      // Right align the calibration prompt
       display.getTextBounds(calibPrompt, 0, 0, &x1, &y1, &w, &h);
       display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
       display.print(calibPrompt);
@@ -1654,10 +1761,6 @@ void displayGraphicCompass() {
     display.println(noFix);
   }
   
-  if (compassInverted) {
-    display.setCursor(0, 0);
-    display.print("[Inv]");
-  }
 
   display.display();
 }
