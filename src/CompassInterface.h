@@ -33,6 +33,12 @@ public:
     virtual int getAzimuth() = 0;
     
     /**
+     * @brief Check if the compass data is valid
+     * @return true if data is valid and ready to use
+     */
+    virtual bool isDataValid() = 0;
+    
+    /**
      * @brief Get the X-axis raw reading
      * @return float X-axis reading
      */
@@ -158,6 +164,10 @@ public:
     
     float getZ() override {
         return _last_z;
+    }
+    
+    bool isDataValid() override {
+        return _initialized && (_last_x != 0 || _last_y != 0 || _last_z != 0);
     }
     
     void getDirection(char* buffer, int azimuth = -1) override {
@@ -326,6 +336,10 @@ public:
     
     float getZ() override {
         return _last_event.magnetic.z;
+    }
+    
+    bool isDataValid() override {
+        return _initialized && (_last_event.magnetic.x != 0 || _last_event.magnetic.y != 0 || _last_event.magnetic.z != 0);
     }
     
     void getDirection(char* buffer, int azimuth = -1) override {

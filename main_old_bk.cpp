@@ -6,7 +6,7 @@
 #include <vector>
 #include <String>
 #include <Preferences.h>
-#include "GPS_Configurator.h"
+#include "GPSConfigurator.h"
 
 // Include SSD1306 display libraries
 #include <Wire.h>

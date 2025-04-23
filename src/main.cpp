@@ -1,16 +1,22 @@
 #include <Arduino.h>
-#include <HardwareSerial.h>
 #include <M5Unified.h>
+#include <Wire.h>
 #include <TinyGPS++.h>
+#include <HardwareSerial.h>
+#include <Preferences.h>
+#include <WiFi.h>  // Add WiFi support
 #include "CompassInterface.h"
+#include "GPSConfigurator.h"  // Fixed header file name
+#include "display/GraphicCompassDisplay.h"
+#include "display/TextCompassDisplay.h"
+#include "display/WorldMapDisplay.h"
+#include "display/GPSStatusDisplay.h"
+#include "./APRS.h"  // Update include path for APRS
 #include <vector>
 #include <String>
-#include <Preferences.h>
-#include "GPS_Configurator.h"
 #include <map> // Add for std::map
 
 // Include SSD1306 display libraries
-#include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
@@ -525,6 +531,29 @@ const unsigned long GPS_CONFIG_RETRY_DELAY = 100; // 100ms between retries
 const uint8_t MAX_GPS_INIT_RETRIES = 3;  // Maximum number of initialization attempts
 bool gpsInitialized = false;  // Track if GPS was successfully initialized
 
+// WiFi Configuration
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+
+// APRS Configuration
+const char* APRS_CALLSIGN = "YOUR_CALLSIGN";  // Your amateur radio callsign
+const char* APRS_PASSCODE = "YOUR_PASSCODE";  // APRS-IS passcode
+const char* APRS_SERVER = "rotate.aprs2.net"; // APRS-IS server
+const int APRS_PORT = 14580;                  // APRS-IS port
+const int APRS_INTERVAL = 30; // seconds
+
+// Create APRS instance
+APRS aprs(WIFI_SSID, WIFI_PASSWORD, APRS_CALLSIGN, APRS_PASSCODE, 
+          APRS_SERVER, APRS_PORT, APRS_INTERVAL);
+
+// APRS State
+bool aprsConnected = false;
+unsigned long lastAprsUpdate = 0;
+WiFiClient aprsClient;
+
+// Compass heading variable
+int compassHeading = 0;
+
 void setup() {
   // Initialize M5 hardware with minimal configuration
   auto cfg = M5.config();
@@ -566,7 +595,7 @@ void setup() {
 
   if (GPS) { // Check if serial port opened successfully
     logMessage("GPS Serial Port OK. Configuring NMEA...");
-    GPSConfigurator gpsConfig(GPS);
+    GPSConfigurator gpsConfig(GPS);  // Changed from GPSConfigurator to GPSConfigurator
     // bool configSuccess = true; // Local variable, not needed for this logic flow
 
     // Set update rate to 10Hz
@@ -973,6 +1002,13 @@ void setup() {
     currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
     displayGraphicCompass();  // Show initial compass display
   }
+
+  // Initialize APRS
+  if (aprs.begin()) {
+      Serial.println("APRS initialized successfully");
+  } else {
+      Serial.println("Failed to initialize APRS");
+  }
 }
 
 void loop() {
@@ -1005,6 +1041,7 @@ void loop() {
   // Always read compass data if available
   if (activeCompass != nullptr) {
     activeCompass->read();
+    compassHeading = activeCompass->getAzimuth();
   }
 
   // Process any available GPS data
@@ -1032,6 +1069,13 @@ void loop() {
         break;
     }
   }
+
+  // Update APRS
+  if (gps.location.isValid() && gps.time.isValid()) {
+      aprs.update(gps.location.lat(), gps.location.lng(), 
+                 gps.altitude.meters(), compassHeading, 
+                 gps.speed.kmph());
+  }
 }
 
 // World Map Screen
@@ -1054,18 +1098,35 @@ void handleLongPressWorldMap() {
 
 // Altitude Correction Mode
 void handleShortPressAltitudeCorrection() {
-  // Short press in altitude correction mode: Increment correction
-  altitudeCorrection += 10;
+  // Short press in altitude correction mode: Increment correction by 1m
+  altitudeCorrection += 1;
   logMessage("Altitude correction: " + String(altitudeCorrection) + "m");
+  
+  // Update display
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Altitude Offset:");
+  display.println(String(altitudeCorrection) + "m");
+  display.println("Short: +1m");
+  display.println("Long: -1m");
+  display.println("Hold 3s: Save");
+  display.display();
 }
 
 void handleLongPressAltitudeCorrection() {
-  // Long press in altitude correction mode: Save and exit
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.putInt(KEY_ALT_CORRECTION, altitudeCorrection);
-  preferences.end();
-  isSettingAltitudeCorrection = false;
-  logMessage("Altitude correction saved: " + String(altitudeCorrection) + "m");
+  // Long press in altitude correction mode: Decrement correction by 1m
+  altitudeCorrection -= 1;
+  logMessage("Altitude correction: " + String(altitudeCorrection) + "m");
+  
+  // Update display
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Altitude Offset:");
+  display.println(String(altitudeCorrection) + "m");
+  display.println("Short: +1m");
+  display.println("Long: -1m");
+  display.println("Hold 3s: Save");
+  display.display();
 }
 
 // Calibration Mode Selection
@@ -1375,21 +1436,18 @@ void handleShortPressGPSStatus() {
 }
 
 void handleLongPressGPSStatus() {
-  // Toggle privacy mode
-  privacyModeEnabled = !privacyModeEnabled;
-  preferences.putBool(KEY_COMPASS_INVERTED, privacyModeEnabled);
+  // Enter altitude correction mode
+  isSettingAltitudeCorrection = true;
+  logMessage("Entering altitude correction mode");
   
-  // Immediately apply privacy filter to update displayed coordinates
-  if (gps.location.isValid()) {
-    applyPrivacyFilter();
-  }
-  
-  // Clearly log that this is GPS coordinate privacy
-  if (privacyModeEnabled) {
-    logMessage("GPS PRIVACY MODE ENABLED - Coordinates will be masked");
-  } else {
-    logMessage("GPS PRIVACY MODE DISABLED - Showing actual coordinates");
-  }
+  // Display current altitude offset
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("Altitude Offset:");
+  display.println(String(altitudeCorrection) + "m");
+  display.println("Short: +1m");
+  display.println("Long: -1m");
+  display.display();
 }
 
 void handleShortPressCompassStatus() {
@@ -1510,6 +1568,13 @@ void displayLogOnOLED() {
   static String displayedGpsProtocol = "Initializing...";
   static unsigned long lastProtocolUpdate = 0;
   const unsigned long PROTOCOL_UPDATE_INTERVAL = 5000; // 5 seconds
+  
+  // Add static variables for packet rate calculation
+  static unsigned long lastPacketTime = 0;
+  static unsigned long packetCount = 0;
+  static float avgPacketsPerSecond = 0.0f;
+  static unsigned long lastRateUpdate = 0;
+  const unsigned long RATE_UPDATE_INTERVAL = 1000; // Update rate every second
 
   display.clearDisplay(); 
   display.setTextSize(1);
@@ -1541,6 +1606,22 @@ void displayLogOnOLED() {
     } else {
       displayedGpsProtocol = "No GPS data";
     }
+  }
+  
+  // Calculate packet rate
+  if (gps.passedChecksum() > packetCount) {
+    packetCount = gps.passedChecksum();
+    lastPacketTime = millis();
+  }
+  
+  // Update average rate every second
+  if (millis() - lastRateUpdate >= RATE_UPDATE_INTERVAL) {
+    if (lastPacketTime > 0) {
+      unsigned long timeDiff = millis() - lastRateUpdate;
+      avgPacketsPerSecond = (float)packetCount / (timeDiff / 1000.0f);
+      packetCount = 0; // Reset counter
+    }
+    lastRateUpdate = millis();
   }
   
   // Display the potentially cached protocol string
@@ -1581,27 +1662,26 @@ void displayLogOnOLED() {
     display.println("m");
   }
 
-  // Display NMEA stats 
+  // Display NMEA packet rate instead of total counts
   display.setCursor(0, 44); // Adjusted Y position
-  display.print("NMEA OK=");
-  display.print(gps.passedChecksum());
-  display.print(" Err=");
-  display.println(gps.failedChecksum());
+  display.print("NMEA ");
+  display.print(avgPacketsPerSecond, 1);
+  display.println(" pkt/s");
 
-  // Display course and speed
+  // Display course and speed combined
   if (gps.course.isValid() && gps.speed.isValid()) {
     display.setCursor(0, 52); // Adjusted Y position
-    display.print("Course: ");
+    display.print("Course ");
     display.print(gps.course.deg());
-    display.println(" deg");
-    
-    display.setCursor(64, 52); // Adjusted X position for speed
-    display.print("Spd: ");
+    display.print("° @ ");
     float speedKmph = gps.speed.kmph();
     bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
     if (!reliableSpeed || speedKmph < 3.0) speedKmph = 0;
     display.print(speedKmph, 1);
-    // Removed "km/h" to save space
+    display.println("km/h");
+  } else {
+    display.setCursor(0, 52);
+    display.println("No course/speed data");
   }
 
   // Draw privacy indicator if privacy mode is enabled
@@ -2025,6 +2105,21 @@ void displayWorldMap() {
   }
   
   display.display();
+}
+
+void saveAndExitAltitudeCorrection() {
+  // Save the altitude correction to preferences
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putInt(KEY_ALT_CORRECTION, altitudeCorrection);
+  preferences.end();
+  
+  // Exit altitude correction mode
+  isSettingAltitudeCorrection = false;
+  
+  // Return to GPS status screen
+  currentDisplayMode = DisplayMode::GPS_STATUS;
+  
+  logMessage("Altitude correction saved: " + String(altitudeCorrection) + "m");
 }
  
  
