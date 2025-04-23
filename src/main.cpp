@@ -751,10 +751,13 @@ void setup() {
       configSuccess = false;
     }
     
-    // Enable essential NMEA messages (GGA, RMC, VTG)
-    if (!gpsConfig.enableNmeaMessage(0xF0, 0x00, true) ||  // GGA
-        !gpsConfig.enableNmeaMessage(0xF0, 0x04, true) ||  // RMC
-        !gpsConfig.enableNmeaMessage(0xF0, 0x05, true)) {  // VTG
+    // Enable essential NMEA messages
+    if (!gpsConfig.enableNmeaMessage(0xF0, 0x00, true) ||  // GGA - Fix data
+        !gpsConfig.enableNmeaMessage(0xF0, 0x04, true) ||  // RMC - Recommended minimum data
+        !gpsConfig.enableNmeaMessage(0xF0, 0x05, true) ||  // VTG - Vector track and speed
+        !gpsConfig.enableNmeaMessage(0xF0, 0x02, true) ||  // GSA - DOP and active satellites
+        !gpsConfig.enableNmeaMessage(0xF0, 0x03, true) ||  // GSV - Satellites in view
+        !gpsConfig.enableNmeaMessage(0xF0, 0x01, true)) {  // GLL - Geographic position
       logMessage("Failed to configure NMEA messages");
       configSuccess = false;
     }
@@ -782,7 +785,13 @@ void setup() {
     logMessage("- Baud Rate: " + String(gpsBaudRate));
     logMessage("- Update Rate: 10Hz");
     logMessage("- Dynamic Model: Portable");
-    logMessage("- NMEA Messages: GGA, RMC, VTG");
+    logMessage("- NMEA Messages: GGA, RMC, VTG, GSA, GSV, GLL");
+    logMessage("  * GGA: Fix data (time, position, fix type)");
+    logMessage("  * RMC: Recommended minimum (pos, vel, time)");
+    logMessage("  * VTG: Vector track and ground speed");
+    logMessage("  * GSA: DOP and active satellites");
+    logMessage("  * GSV: Satellites in view");
+    logMessage("  * GLL: Geographic position");
   } else {
     logMessage("*** WARNING: GPS initialization failed after " + String(MAX_GPS_INIT_RETRIES) + " attempts ***");
     logMessage("System will continue but GPS functionality may be limited");
@@ -793,15 +802,18 @@ void loop() {
   // Update M5 hardware state (buttons, etc.)
   M5.update();
 
-  // Normal GPS data processing
-  while (GPS.available() > 0) {
-    char c = GPS.read();
-    gps.encode(c);
-  }
+  // Only process GPS data if initialization was successful
+  if (gpsInitialized) {
+    while (GPS.available() > 0) {
+      char c = GPS.read();
+      gps.encode(c);
+      Host.write(c);  // Forward NMEA data to UART2 (not logged to buffer)
+    }
 
-  // Apply privacy filter if GPS data was updated
-  if (gps.location.isValid()) {
-    applyPrivacyFilter();
+    // Apply privacy filter if GPS data was updated
+    if (gps.location.isValid()) {
+      applyPrivacyFilter();
+    }
   }
 
   // Update display based on current mode
