@@ -582,23 +582,31 @@ void setup() {
     delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
 
     // Enable essential NMEA messages (GGA, RMC, VTG, GSA, GSV, GLL)
-    logMessage("Enabling NMEA Messages...");
+    logMessage("Attempting to enable NMEA Messages...");
     const uint8_t nmeaClass = 0xF0;
     const uint8_t msgIds[] = {0x00, 0x04, 0x05, 0x02, 0x03, 0x01};
     const char* msgNames[] = {"GGA", "RMC", "VTG", "GSA", "GSV", "GLL"};
-    bool nmeaConfigSuccess = true;
+    bool anyNmeaFail = false;
 
     for (size_t i = 0; i < sizeof(msgIds) / sizeof(msgIds[0]); ++i) {
-        logMessage("  Enabling " + String(msgNames[i]) + "...");
-        if (!gpsConfig.enableNmeaMessage(nmeaClass, msgIds[i], true)) {
-            logMessage("    -> Failed to enable " + String(msgNames[i]));
-            nmeaConfigSuccess = false;
+        logMessage("  Sending enable command for: " + String(msgNames[i]) + "...");
+        // enableNmeaMessage sends the command but doesn't wait for ACK/NACK
+        if (gpsConfig.enableNmeaMessage(nmeaClass, msgIds[i], true)) {
+             // We can only confirm the command was *sent*
+             // logMessage("    -> Command sent successfully."); 
+        } else {
+            // This case likely won't happen unless sendUbxCommand fails, but good practice
+            logMessage("    -> ERROR: Failed to *send* enable command for " + String(msgNames[i]));
+            anyNmeaFail = true; 
         }
         delay(GPS_CONFIG_RETRY_DELAY / 2); 
     }
 
-    if (!nmeaConfigSuccess) {
-        logMessage("Warning: Failed to enable one or more NMEA messages.");
+    if (anyNmeaFail) {
+        logMessage("Warning: Failed to *send* one or more NMEA enable commands.");
+    } else {
+        logMessage("All NMEA enable commands sent successfully.");
+        // Note: This doesn't guarantee the GPS *accepted* all commands.
     }
 
     logMessage("Attempting to save GPS configuration...");
