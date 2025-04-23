@@ -1,0 +1,40 @@
+{
+  "name": "Code Editing Best Practices",
+  "description": "Rules for making targeted code changes and preventing unrelated edits",
+  "rules": [
+    {
+      "name": "Targeted Changes",
+      "description": "Ensure changes are focused and don't affect unrelated code",
+      "pattern": "When editing code:",
+      "actions": [
+        "Always read the file contents first to understand context",
+        "Make changes only to the specific section needed",
+        "Use '// ... existing code ...' to preserve unchanged sections",
+        "Keep edits minimal and focused on the task at hand",
+        "Verify changes don't affect unrelated functionality"
+      ]
+    },
+    {
+      "name": "Context Preservation",
+      "description": "Maintain surrounding code context during edits",
+      "pattern": "When making edits:",
+      "actions": [
+        "Include sufficient context lines before and after changes",
+        "Preserve existing comments and documentation",
+        "Maintain code structure and formatting",
+        "Keep related code blocks together"
+      ]
+    },
+    {
+      "name": "Edit Validation",
+      "description": "Verify changes are correct and targeted",
+      "pattern": "Before applying changes:",
+      "actions": [
+        "Review the complete edit in context",
+        "Ensure changes match the intended purpose",
+        "Verify no unintended side effects",
+        "Check for any missing dependencies or imports"
+      ]
+    }
+  ]
+} 

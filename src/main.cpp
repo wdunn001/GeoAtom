@@ -696,6 +696,53 @@ void loop() {
   if (gps.location.isValid()) {
     applyPrivacyFilter();
   }
+
+  // Update display based on current mode
+  static unsigned long lastDisplayUpdate = 0;
+  if (millis() - lastDisplayUpdate >= 100) {  // Update display every 100ms
+    lastDisplayUpdate = millis();
+
+    // Get current heading if compass is available
+    int currentHeading = 0;
+    if (activeCompass != nullptr) {
+      activeCompass->read();
+      currentHeading = activeCompass->getAzimuth();
+    }
+
+    // Update display based on current mode
+    switch (currentDisplayMode) {
+      case DisplayMode::GPS_STATUS:
+        displayLogOnOLED();
+        break;
+
+      case DisplayMode::COMPASS_STATUS:
+        displayCompassLogOnOLED();
+        break;
+
+      case DisplayMode::GRAPHIC_COMPASS:
+        displayGraphicCompass();
+        break;
+
+      case DisplayMode::WORLD_MAP:
+        displayWorldMap();
+        break;
+    }
+  }
+
+  // Handle button presses based on current state
+  UIState currentState = determineCurrentUIState();
+  auto handlers = buttonHandlerMap[currentState];
+
+  if (M5.BtnA.wasPressed()) {
+    if (handlers.shortPressHandler) {
+      handlers.shortPressHandler();
+    }
+  }
+  else if (M5.BtnA.wasHold()) {
+    if (handlers.longPressHandler) {
+      handlers.longPressHandler();
+    }
+  }
 }
 
 // World Map Screen
@@ -1105,5 +1152,550 @@ void scanI2CDevices() {
   if (nDevices == 0) {
     logMessage("No I2C devices found");
   }
+}
+
+// Display function implementations
+void updateDisplay(float lat, float lng, float alt, int heading) {
+  if (!display_initialized) return;
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("GPS Data:");
+  display.println("-------------");
+  
+  // Format and display coordinates
+  display.print("Lat: "); display.println(lat, 6);
+  display.print("Lng: "); display.println(lng, 6);
+  display.print("Alt: "); display.print(alt + altitudeCorrection); display.println("m");
+  
+  // --- Compass Direction and Azimuth --- 
+  char dirArray[4] = {' ', ' ', ' ', '\0'}; // Array to hold direction text (e.g., NNE)
+  
+  if (activeCompass != nullptr) {
+    int displayHeading = heading;
+    // Apply inversion if compass is inverted
+    if (compassInverted) {
+      displayHeading = (heading + 180) % 360;
+    }
+    
+    activeCompass->getDirection(dirArray, displayHeading);
+    
+    display.setCursor(0, 40); // Position for Direction Text
+    display.print(dirArray);
+    
+    display.setCursor(0, 48); // Position for Azimuth value
+    display.print("Az ");
+    display.println(displayHeading);
+    
+    // Show declination if using HMC5883L
+    if (activeCompass == &hmcCompass) {
+      float declDegrees = currentDeclination * 180.0 / PI;
+      display.setCursor(50, 40);
+      display.print("Decl:");
+      display.print(declDegrees, 1);
+      display.print("\xB0"); // Degree symbol
+    }
+  } else {
+    display.setCursor(0, 40);
+    display.print("No compass");
+    display.setCursor(0, 48);
+    display.print("Az: ---");
+  }
+  
+  // Display satellite count
+  display.setCursor(0, 56);
+  display.print("Sats: ");
+  display.println(gps.satellites.value());
+  
+  display.display();
+}
+
+void displayLogOnOLED() {
+  if (!display_initialized) return;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Center the title
+  String title = "--- GPS Status ---";
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 0);
+  display.println(title);
+
+  // Display GPS data format with dynamic sentence types
+  String gpsProtocol = "";
+  if (gps.charsProcessed() > 0) {
+    if (gps.location.isUpdated()) gpsProtocol += "GGA ";
+    if (gps.date.isUpdated() || gps.time.isUpdated()) gpsProtocol += "RMC ";
+    if (gps.course.isUpdated()) gpsProtocol += "VTG ";
+    if (gps.satellites.isUpdated()) gpsProtocol += "GSV ";
+    if (gpsProtocol.length() == 0) gpsProtocol = "NMEA";
+    gpsProtocol += String(gpsBaudRate);
+  } else {
+    gpsProtocol = "No GPS data";
+  }
+  
+  display.setCursor(0, 8);
+  display.println(gpsProtocol);
+  
+  // Display Lat, Lng, and Sat
+  if (gps.location.isValid()) {
+    float lat = gps.location.lat();
+    float lng = gps.location.lng();
+    
+    display.setCursor(0, 16);
+    display.print("Lat ");
+    display.println(lat, 5);
+    
+    display.setCursor(0, 24);
+    display.print("Lng ");
+    display.println(lng, 5);
+  } else {
+    display.setCursor(0, 16);
+    display.println("Lat No Fix");
+    display.setCursor(0, 24);
+    display.println("Lng No Fix");
+  }
+  
+  // Display satellite count
+  display.setCursor(0, 32);
+  display.print("Sat ");
+  display.println(gps.satellites.value());
+  
+  // Add NMEA stats
+  display.setCursor(0, 40);
+  display.print("NMEA: OK=");
+  display.print(gps.passedChecksum());
+  display.print(" Err=");
+  display.println(gps.failedChecksum());
+
+  // Display altitude with correction
+  if (gps.altitude.isValid()) {
+    float correctedAlt = gps.altitude.meters() + altitudeCorrection;
+    display.setCursor(64, 32);
+    display.print("Alt ");
+    display.print(correctedAlt, 0);
+    display.println("m");
+  }
+
+  // Display course and speed
+  if (gps.course.isValid() && gps.speed.isValid()) {
+    display.setCursor(0, 48);
+    display.print("Course: ");
+    display.print(gps.course.deg());
+    display.println("°");
+    
+    display.setCursor(0, 56);
+    display.print("Speed: ");
+    float speedKmph = gps.speed.kmph();
+    bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
+    if (!reliableSpeed || speedKmph < 3.0) speedKmph = 0;
+    display.print(speedKmph, 1);
+    display.println(" km/h");
+  }
+
+  display.display();
+}
+
+void displayCompassLogOnOLED() {
+  if (!display_initialized) return;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  if (isSelectingCalibrationMode) {
+    display.setCursor(0, 0);
+    display.println("Select Cal Mode:");
+    display.println("---------------");
+    
+    for (int i = 0; i < NUM_CALIBRATION_MODES; i++) {
+      if (i == calibrationModeIndex) {
+        display.print("> ");
+      } else {
+        display.print("  ");
+      }
+      display.println(CALIBRATION_MODE_NAMES[i]);
+    }
+    
+    display.setCursor(0, SCREEN_HEIGHT - 16);
+    display.println("Click: Next Option");
+    display.println("Hold: Select Option");
+  }
+  else if (isCalibrating && activeCompass == &qmcCompass) {
+    display.setCursor(0, 0);
+    display.println("-- Calibrating --");
+    display.setCursor(0, 10);
+    display.print("Mode: ");
+    display.print(calibrationPoints);
+    display.println("-point");
+    
+    display.setCursor(0, 26);
+    String directions = "";
+    
+    if (calibrationPoints == 4) {
+      switch (calibrationStep) {
+        case 1: directions = "Point NORTH, Click"; break;
+        case 2: directions = "Point EAST, Click"; break;
+        case 3: directions = "Point SOUTH, Click"; break;
+        case 4: directions = "Point WEST, Click"; break;
+      }
+    } 
+    else if (calibrationPoints == 8) {
+      switch (calibrationStep) {
+        case 1: directions = "Point NORTH, Click"; break;
+        case 2: directions = "Point SOUTH, Click"; break;
+        case 3: directions = "Point EAST, Click"; break;
+        case 4: directions = "Point WEST, Click"; break;
+        case 5: directions = "Point NE, Click"; break;
+        case 6: directions = "Point SE, Click"; break;
+        case 7: directions = "Point SW, Click"; break;
+        case 8: directions = "Point NW, Click"; break;
+      }
+    } 
+    else {
+      directions = "Point to " + String(calibrationStep * 22.5) + " deg";
+    }
+    
+    display.println(directions);
+    
+    display.setCursor(0, 46);
+    display.print("Progress: ");
+    display.print(calibrationStep - 1);
+    display.print("/");
+    display.println(calibrationPoints);
+    
+    display.setCursor(0, 56);
+    display.println("(Hold Btn to Cancel)");
+  }
+  else if (isSettingDeclination && activeCompass == &hmcCompass) {
+    display.setCursor(0, 0);
+    display.println("- Set Declination -");
+    
+    display.setCursor(0, 16);
+    display.println("Point device to TRUE");
+    display.setCursor(0, 26);
+    display.println("NORTH, then click");
+    
+    display.setCursor(0, 40);
+    display.print("Current: ");
+    display.print(activeCompass->getAzimuth());
+    display.println(" deg");
+    
+    display.setCursor(0, 56);
+    display.println("Hold: Cancel");
+  }
+  else if (isSettingInversion) {
+    display.setCursor(0, 0);
+    display.println("Invert Compass?");
+    display.println("---------------");
+    
+    int centerX = SCREEN_WIDTH / 2;
+    int centerY = 30;
+    int radius = 15;
+    
+    if (activeCompass != nullptr) {
+      int heading = activeCompass->getAzimuth();
+      if (compassInverted) {
+        heading = (heading + 180) % 360;
+      }
+      
+      float angleRad = radians(270 - heading);
+      int endX = centerX + radius * cos(angleRad);
+      int endY = centerY + radius * sin(angleRad);
+      
+      display.drawCircle(centerX, centerY, radius, SSD1306_WHITE);
+      display.drawLine(centerX, centerY, endX, endY, SSD1306_WHITE);
+      display.fillCircle(centerX, centerY, 2, SSD1306_WHITE);
+      
+      display.setCursor(centerX - 2, centerY - radius - 6);
+      display.print("N");
+      display.setCursor(centerX - 2, centerY + radius);
+      display.print("S");
+      display.setCursor(centerX + radius, centerY - 2);
+      display.print("E");
+      display.setCursor(centerX - radius - 5, centerY - 2);
+      display.print("W");
+      
+      display.setCursor(68, 14);
+      display.print("Hdg:");
+      display.print(heading);
+      display.print("\xB0");
+    }
+    
+    display.setCursor(0, SCREEN_HEIGHT - 18);
+    display.println("Click: Normal");
+    display.setCursor(70, SCREEN_HEIGHT - 18);
+    display.println("Hold: Invert");
+    
+    display.setCursor(0, SCREEN_HEIGHT - 8);
+    display.print("Current: ");
+    display.print(compassInverted ? "Inverted" : "Normal");
+  }
+  else {
+    String title = "-- Compass Status --";
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((SCREEN_WIDTH - w) / 2, 0);
+    display.println(title);
+    
+    if (activeCompass != nullptr) {
+      display.setCursor(0, 10);
+      display.print(activeCompass->getSensorName());
+      
+      if (activeCompass == &hmcCompass) {
+        float declDegrees = currentDeclination * 180.0 / PI;
+        display.print(" Decl:");
+        display.print(declDegrees, 1);
+        display.print("\xB0");
+      }
+      
+      activeCompass->read();
+      int displayHeading = activeCompass->getAzimuth();
+      if (compassInverted) {
+        displayHeading = (displayHeading + 180) % 360;
+      }
+      
+      display.setCursor(0, 20);
+      display.print("Az ");
+      display.print(displayHeading);
+      display.print("\xB0 ");
+      
+      char dirArray[4] = {' ', ' ', ' ', '\0'};
+      activeCompass->getDirection(dirArray, displayHeading);
+      display.print(dirArray);
+      
+      display.setCursor(0, 30);
+      display.print("X: ");
+      display.println(activeCompass->getX());
+      display.setCursor(0, 38);
+      display.print("Y: ");
+      display.println(activeCompass->getY());
+      display.setCursor(0, 46);
+      display.print("Z: ");
+      display.println(activeCompass->getZ());
+      
+      if (compassInverted) {
+        display.setCursor(0, 56);
+        display.print("[Inverted]");
+      }
+    } else {
+      display.setCursor(0, 20);
+      display.println("No compass detected");
+    }
+    
+    if (activeCompass != nullptr) {
+      String calibPrompt = "";
+      if (activeCompass == &qmcCompass) {
+        calibPrompt = "Cal: Hold";
+      } else if (activeCompass == &hmcCompass) {
+        calibPrompt = "Decl: Hold";
+      }
+      
+      display.getTextBounds(calibPrompt, 0, 0, &x1, &y1, &w, &h);
+      display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
+      display.print(calibPrompt);
+    }
+  }
+
+  display.display();
+}
+
+void displayGraphicCompass() {
+  if (!display_initialized) return;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  int centerX = SCREEN_WIDTH / 2;
+  int centerY = SCREEN_HEIGHT / 2;
+  int radius = 22;
+  int heading = 0;
+  
+  if (activeCompass != nullptr) {
+    heading = activeCompass->getAzimuth();
+    if (compassInverted) {
+      heading = (heading + 180) % 360;
+    }
+    
+    float angleRad = radians(270 - heading);
+    
+    display.drawCircle(centerX, centerY, radius, SSD1306_WHITE);
+    
+    int endX = centerX + radius * cos(angleRad);
+    int endY = centerY + radius * sin(angleRad);
+    display.drawLine(centerX, centerY, endX, endY, SSD1306_WHITE);
+    
+    float arrowAngle1 = angleRad + radians(150);
+    float arrowAngle2 = angleRad + radians(210);
+    int arrowLength = 6;
+    int arrow1X = endX + arrowLength * cos(arrowAngle1);
+    int arrow1Y = endY + arrowLength * sin(arrowAngle1);
+    int arrow2X = endX + arrowLength * cos(arrowAngle2);
+    int arrow2Y = endY + arrowLength * sin(arrowAngle2);
+    display.drawLine(endX, endY, arrow1X, arrow1Y, SSD1306_WHITE);
+    display.drawLine(endX, endY, arrow2X, arrow2Y, SSD1306_WHITE);
+    
+    display.fillCircle(centerX, centerY, 2, SSD1306_WHITE);
+    
+    display.setCursor(centerX - 2, centerY - radius - 7);
+    display.print("N");
+    display.setCursor(centerX - 2, centerY + radius + 1);
+    display.print("S");
+    display.setCursor(centerX + radius + 2, centerY - 3);
+    display.print("E");
+    display.setCursor(centerX - radius - 7, centerY - 3);
+    display.print("W");
+  } else {
+    display.setCursor(centerX - 8, centerY - 4);
+    display.print("ERR");
+  }
+
+  if (activeCompass != nullptr) {
+    display.setCursor(0, 0);
+    display.print("Az ");
+    display.print(heading);
+  } else {
+    display.setCursor(0, 0);
+    display.print("Az ---");
+  }
+  
+  if (gps.altitude.isValid()) {
+    bool reliableAlt = gps.satellites.value() >= 5 && gps.hdop.isValid() && gps.hdop.hdop() < 2.5;
+    float correctedAlt = gps.altitude.meters() + altitudeCorrection;
+    
+    if (reliableAlt) {
+      String altStr = "Alt " + String(correctedAlt, 0) + "m";
+      int16_t x1, y1;
+      uint16_t w, h;
+      display.getTextBounds(altStr, 0, 0, &x1, &y1, &w, &h);
+      display.setCursor(SCREEN_WIDTH - w, 0);
+      display.print(altStr);
+    }
+  }
+  
+  if (gps.speed.isValid()) {
+    bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
+    float speedKmph = gps.speed.kmph();
+    if (!reliableSpeed || speedKmph < 3.0) speedKmph = 0;
+    
+    if (speedKmph > 0) {
+      String spdStr = "Spd " + String(speedKmph, 1) + "km/h";
+      int16_t x1, y1;
+      uint16_t w, h;
+      display.getTextBounds(spdStr, 0, 0, &x1, &y1, &w, &h);
+      display.setCursor(centerX + radius + 4, centerY - h/2);
+      display.print(spdStr);
+    }
+  }
+  
+  if (gps.location.isValid()) {
+    float lat = gps.location.lat();
+    float lng = gps.location.lng();
+    
+    display.setCursor(0, SCREEN_HEIGHT - 16);
+    display.println("Lat");
+    display.setCursor(0, SCREEN_HEIGHT - 8);
+    display.print(String(lat, 5));
+    
+    String lngLabel = "Lng";
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(lngLabel, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 16);
+    display.println(lngLabel);
+    
+    String lngValue = String(lng, 5);
+    display.getTextBounds(lngValue, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
+    display.print(lngValue);
+  } else {
+    display.setCursor(0, SCREEN_HEIGHT - 16);
+    display.println("Lat");
+    display.setCursor(0, SCREEN_HEIGHT - 8);
+    display.println("No Fix");
+    
+    String lngLabel = "Lng";
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(lngLabel, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 16);
+    display.println(lngLabel);
+    
+    String noFix = "No Fix";
+    display.getTextBounds(noFix, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
+    display.println(noFix);
+  }
+  
+  if (compassInverted) {
+    display.setCursor(0, 0);
+    display.print("[Inv]");
+  }
+
+  display.display();
+}
+
+void displayWorldMap() {
+  if (!display_initialized) return;
+
+  display.clearDisplay();
+  
+  display.drawBitmap(0, 0, world_map, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  
+  if (gps.location.isValid()) {
+    float lat = gps.location.lat();
+    float lng = gps.location.lng();
+    
+    int posX = (int)((lng + 180.0) / 360.0 * SCREEN_WIDTH);
+    
+    if (lat > 85.0) lat = 85.0;
+    if (lat < -85.0) lat = -85.0;
+    
+    float latRad = lat * PI / 180.0;
+    float mercN = log(tan((PI/4) + (latRad/2)));
+    int posY = (int)(SCREEN_HEIGHT/2 - (mercN * SCREEN_HEIGHT / (2*PI)));
+    
+    posX = constrain(posX, 0, SCREEN_WIDTH-1);
+    posY = constrain(posY, 0, SCREEN_HEIGHT-1);
+    
+    if ((millis() / 500) % 2 == 0) {
+      display.fillCircle(posX, posY, 3, SSD1306_WHITE);
+      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
+    } else {
+      display.drawCircle(posX, posY, 3, SSD1306_WHITE);
+      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
+    }
+    
+    if (activeCompass != nullptr) {
+      activeCompass->read();
+      int heading = activeCompass->getAzimuth();
+      
+      if (compassInverted) {
+        heading = (heading + 180) % 360;
+      }
+      
+      float radians = heading * PI / 180.0;
+      int arrowLength = 8;
+      int endX = posX + sin(radians) * arrowLength;
+      int endY = posY - cos(radians) * arrowLength;
+      
+      display.drawLine(posX, posY, endX, endY, SSD1306_WHITE);
+    }
+  } else {
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(2, SCREEN_HEIGHT - 8);
+    display.print("No Fix");
+  }
+  
+  display.display();
 }
  
