@@ -196,8 +196,8 @@ const char* KEY_HMC_Y_SCALE = "hmcYScale"; // Key for HMC Y scale
 const char* KEY_HMC_Z_SCALE = "hmcZScale"; // Key for HMC Z scale
 
 // Add these configuration flags near the other configuration flags
-bool useM5StackSmoothing = false;      // Whether to use M5Stack's built-in smoothing
-bool useM5StackInterference = false;    // Whether to use M5Stack's built-in magnetic interference detection
+bool useM5StackSmoothing = true;      // Whether to use M5Stack's built-in smoothing (DEFAULT ON)
+bool useM5StackInterference = true;    // Whether to use M5Stack's built-in magnetic interference detection (DEFAULT ON)
 
 // Add these configuration keys with the other preference keys
 const char* KEY_USE_M5_SMOOTHING = "useM5Smooth";     // Key for M5Stack smoothing preference
@@ -460,11 +460,11 @@ bool enableCompassDebug = true;   // Set to true to output detailed compass diag
 unsigned long lastCompassDebugOutput = 0; // Timestamp for last compass debug output
 
 // Compass interference mitigation
-// Configuration flags - these can be toggled in settings
-bool enableOutlierRejection = false;      // Reject sudden large jumps in heading
-bool enableNoiseThreshold = false;        // Ignore small changes below threshold
-bool enableGpsFusion = false;             // Blend GPS course when moving
-bool enableMagneticInterference = false;  // Detect and compensate for interference
+// Configuration flags - set custom ones to false by default
+bool enableOutlierRejection = false;      // Reject sudden large jumps in heading (DEFAULT OFF)
+bool enableNoiseThreshold = false;        // Ignore small changes below threshold (DEFAULT OFF)
+bool enableGpsFusion = false;             // Blend GPS course when moving (DEFAULT OFF)
+bool enableMagneticInterference = false;  // Detect and compensate for interference (DEFAULT OFF)
 
 // Constants for interference mitigation
 int MAX_HEADING_JUMP = 0;           // Maximum allowed heading change in degrees per reading
@@ -526,8 +526,90 @@ const uint8_t MAX_GPS_INIT_RETRIES = 3;  // Maximum number of initialization att
 bool gpsInitialized = false;  // Track if GPS was successfully initialized
 
 void setup() {
-  delay(1000);  // Give peripherals time to initialize
+  // Initialize M5 hardware with minimal configuration
+  auto cfg = M5.config();
+  cfg.serial_baudrate = 0;  // Disable M5 serial
+  M5.begin(cfg);
+
+  // Initialize I2C
+  Wire.begin(I2C_SDA, I2C_SCL);
   
+  // Initialize display first
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    // If display fails, we can't show anything
+    return;
+  }
+  display_initialized = true;
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Starting...");
+  display.display();
+
+  // Initialize GPS with basic settings
+  GPS.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
+  gpsInitialized = true;
+
+  // Initialize Host serial for debug
+  Host.begin(9600, SERIAL_8N1, HOST_RX, HOST_TX);
+
+  // Try to initialize compass
+  if (qmcCompass.begin()) {
+    activeCompass = &qmcCompass;
+  } else if (hmcCompass.begin()) {
+    activeCompass = &hmcCompass;
+  }
+
+  // Load preferences OR apply defaults
+  preferences.begin(PREF_NAMESPACE, true); // Open read-only first to check if keys exist
+
+  // Load M5Stack settings, default to true if not found
+  useM5StackSmoothing = preferences.getBool(KEY_USE_M5_SMOOTHING, true);
+  useM5StackInterference = preferences.getBool(KEY_USE_M5_INTERFERENCE, true);
+  
+  // Keep custom features disabled (defaults to false)
+  enableOutlierRejection = preferences.getBool(KEY_OUTLIER_REJECTION, false);
+  enableNoiseThreshold = preferences.getBool(KEY_NOISE_THRESHOLD, false);
+  enableGpsFusion = preferences.getBool(KEY_GPS_FUSION, false);
+  enableMagneticInterference = preferences.getBool(KEY_MAG_INTERFERENCE, false);
+
+  // Load related thresholds/parameters (these can still be loaded even if algo is off)
+  MAX_HEADING_JUMP = preferences.getInt("maxHeadingJump", 0);
+  HEADING_NOISE_THRESHOLD = preferences.getInt("headingNoiseThresh", 0);
+  MAGNETIC_VARIANCE_THRESHOLD = preferences.getFloat("magVarThresh", 0.0f);
+  ALPHA = preferences.getFloat("compassAlpha", 0.0f);
+  COMPASS_XYZ_ALPHA = preferences.getFloat("compassXYZAlpha", 0.0f);
+  
+  // Load other settings (declination, inversion, etc.)
+  compassInverted = preferences.getBool(KEY_COMPASS_INVERTED, false);
+  altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0);
+  if (activeCompass == &hmcCompass) {
+      currentDeclination = preferences.getFloat(KEY_DECLINATION, 0.0f);
+      hmcCompass.setDeclination(currentDeclination);
+  }
+  // Note: We don't load calibration here in the simplified setup
+
+  preferences.end();
+
+  // Set initial display mode
+  currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
+  
+  // Log the active settings
+  logMessage("--- Active Settings ---");
+  logMessage("M5 Smoothing: " + String(useM5StackSmoothing ? "ON" : "OFF"));
+  logMessage("M5 Interference: " + String(useM5StackInterference ? "ON" : "OFF"));
+  logMessage("Custom Smoothing: OFF");
+  logMessage("Custom Interference: OFF");
+  logMessage("-----------------------");
+
+  // Show ready message
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("System Ready");
+  display.display();
+  delay(1000);  // Show ready message for 1 second
+
   // Initialize the button handler map
   buttonHandlerMap[UIState::GPS_STATUS_SCREEN] = ButtonHandlers{handleShortPressGPSStatus, handleLongPressGPSStatus};
   buttonHandlerMap[UIState::COMPASS_STATUS_SCREEN] = ButtonHandlers{handleShortPressCompassStatus, handleLongPressCompassStatus};
@@ -538,20 +620,6 @@ void setup() {
   buttonHandlerMap[UIState::CALIBRATING_COMPASS] = ButtonHandlers{handleShortPressCalibrating, handleLongPressCalibrating};
   buttonHandlerMap[UIState::SETTING_DECLINATION] = ButtonHandlers{handleShortPressDeclination, handleLongPressDeclination};
   buttonHandlerMap[UIState::SETTING_INVERSION] = ButtonHandlers{handleShortPressInversion, handleLongPressInversion};
-  
-  // Initialize M5 hardware
-  auto cfg = M5.config();
-  cfg.serial_baudrate = 0; // Disable serial
-  M5.begin(cfg);
-  
-  // Initialize I2C with correct pins
-  Wire.begin(I2C_SDA, I2C_SCL);
-  
-  // Initialize GPS serial
-  GPS.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
-  
-  // Initialize Host serial (for debugging)
-  Host.begin(9600, SERIAL_8N1, HOST_RX, HOST_TX);
   
   // Initialize preferences
   preferences.begin(PREF_NAMESPACE, true); // Open read-only
@@ -828,81 +896,60 @@ void setup() {
 }
 
 void loop() {
-  // Update M5 hardware state (buttons, etc.)
+  // Basic hardware update - must happen first
   M5.update();
 
-  // Only process GPS data if initialization was successful
-  if (gpsInitialized) {
-    while (GPS.available() > 0) {
-      char c = GPS.read();
-      gps.encode(c);
-      Host.write(c);  // Forward NMEA data to UART2
-    }
-
-    // Apply privacy filter if GPS data was updated
-    if (gps.location.isValid()) {
-      applyPrivacyFilter();
+  // Simple button check with hold threshold
+  M5.BtnA.setHoldThresh(800);  // Set long press threshold to 800ms
+  
+  UIState currentState = determineCurrentUIState();
+  auto handlers = buttonHandlerMap[currentState];
+  
+  static bool longPressHandled = false;
+  
+  // Handle long press first
+  if (M5.BtnA.wasHold()) {
+    if (!longPressHandled && handlers.longPressHandler) {
+      handlers.longPressHandler();
+      longPressHandled = true;
     }
   }
-
-  // Update display based on current mode
-  static unsigned long lastDisplayUpdate = 0;
-  if (millis() - lastDisplayUpdate >= 100) {  // Update display every 100ms
-    lastDisplayUpdate = millis();
-
-    if (!display_initialized) {
-      return;
+  // Handle short press only if no long press occurred
+  else if (M5.BtnA.wasReleased()) {
+    if (!longPressHandled && handlers.shortPressHandler) {
+      handlers.shortPressHandler();
     }
+    longPressHandled = false;  // Reset on release
+  }
 
-    // Get current heading if compass is available
-    int currentHeading = 0;
-    if (activeCompass != nullptr) {
-      activeCompass->read();
-      currentHeading = activeCompass->getAzimuth();
-    }
+  // Always read compass data if available
+  if (activeCompass != nullptr) {
+    activeCompass->read();
+  }
 
-    // Update display based on current mode
+  // Basic display update
+  if (display_initialized) {
     switch (currentDisplayMode) {
       case DisplayMode::GPS_STATUS:
         displayLogOnOLED();
         break;
-
       case DisplayMode::COMPASS_STATUS:
         displayCompassLogOnOLED();
         break;
-
       case DisplayMode::GRAPHIC_COMPASS:
         displayGraphicCompass();
         break;
-
       case DisplayMode::WORLD_MAP:
         displayWorldMap();
         break;
     }
   }
 
-  // Handle button presses based on current state
-  UIState currentState = determineCurrentUIState();
-  auto handlers = buttonHandlerMap[currentState];
-
-  // Configure button timing
-  M5.BtnA.setHoldThresh(800);  // Set long press threshold to 800ms
-  
-  static bool longPressHandled = false;  // Track if long press was handled in current press cycle
-  
-  // Check for long press first
-  if (M5.BtnA.wasHold()) {
-    longPressHandled = true;  // Mark that we handled a long press
-    if (handlers.longPressHandler) {
-      handlers.longPressHandler();
+  // Process any available GPS data
+  if (gpsInitialized) {
+    while (GPS.available()) {
+      gps.encode(GPS.read());
     }
-  }
-  // Only handle regular press if no long press occurred
-  else if (M5.BtnA.wasReleased()) {
-    if (!longPressHandled && handlers.shortPressHandler) {  // Only if no long press was handled
-      handlers.shortPressHandler();
-    }
-    longPressHandled = false;  // Reset the flag when button is released
   }
 }
 
@@ -914,20 +961,9 @@ void handleShortPressWorldMap() {
 }
 
 void handleLongPressWorldMap() {
-  // Long press on World Map: Toggle privacy mode
+  // Toggle privacy mode
   privacyModeEnabled = !privacyModeEnabled;
-  
-  // Immediately apply privacy filter to update displayed coordinates
-  if (gps.location.isValid()) {
-    applyPrivacyFilter();
-  }
-  
-  // Clearly log that this is GPS coordinate privacy
-  if (privacyModeEnabled) {
-    logMessage("GPS PRIVACY MODE ENABLED - Coordinates will be masked");
-  } else {
-    logMessage("GPS PRIVACY MODE DISABLED - Showing actual coordinates");
-  }
+  logMessage("Privacy mode " + String(privacyModeEnabled ? "enabled" : "disabled"));
 }
 
 // Altitude Correction Mode
@@ -1170,14 +1206,18 @@ void handleShortPressDeclination() {
   // Short press in declination setting: Set declination
   if (activeCompass == &hmcCompass) {
     activeCompass->read();
-    int magneticHeading = activeCompass->getAzimuth();
-    
-    // Convert heading to the -180 to +180 format for declination
-    float declination = magneticHeading;
-    if (declination > 180) declination -= 360;
-    
-    // Convert to radians
-    currentDeclination = radians(declination);
+    int magneticHeading = activeCompass->getAzimuth(); // Read the current magnetic heading
+
+    // Calculate the declination angle
+    // Declination = True North (0) - Magnetic Heading read when pointing True North
+    float declinationDegrees = -magneticHeading;
+
+    // Normalize to +/- 180 degrees
+    while (declinationDegrees > 180.0f) declinationDegrees -= 360.0f;
+    while (declinationDegrees <= -180.0f) declinationDegrees += 360.0f;
+
+    // Convert to radians for storage and setting
+    currentDeclination = radians(declinationDegrees);
   
     // Apply declination immediately
     hmcCompass.setDeclination(currentDeclination);
@@ -1187,13 +1227,11 @@ void handleShortPressDeclination() {
     preferences.putFloat(KEY_DECLINATION, currentDeclination);
     preferences.end();
     
-    float declDegrees = currentDeclination * 180.0 / PI;
-    logMessage("Declination set to: " + String(declDegrees, 1) + " degrees");
-    logMessage("True north should now be at compass heading: 0°");
+    logMessage("Declination set to: " + String(declinationDegrees, 1) + " degrees");
+    logMessage("True north should now be at compass heading: 0 deg");
     
     // Make note about calibration and declination working together
-    logMessage("HMC5883L now has both calibration + declination applied");
-    logMessage("This gives best accuracy: Calibration fixes distortion, declination aligns to true north");
+    logMessage("HMC5883L now has calibration + declination applied");
     
     // Exit declination setting
     isSettingDeclination = false;
@@ -1275,8 +1313,15 @@ void handleShortPressCompassStatus() {
 }
 
 void handleLongPressCompassStatus() {
-  // Toggle compass calibration mode
-  isCalibrating = !isCalibrating;
+  // Start calibration mode selection
+  if (activeCompass == &qmcCompass) {
+    isSelectingCalibrationMode = true;
+    calibrationModeIndex = 1; // Default to 8-point
+    logMessage("Entering calibration mode selection...");
+  } else if (activeCompass == &hmcCompass) {
+    isSettingDeclination = true;
+    logMessage("Entering declination setting mode...");
+  }
 }
 
 void handleShortPressGraphicCompass() {
@@ -1288,7 +1333,7 @@ void handleShortPressGraphicCompass() {
 void handleLongPressGraphicCompass() {
   // Toggle compass inversion
   compassInverted = !compassInverted;
-  preferences.putBool(KEY_COMPASS_INVERTED, compassInverted);
+  logMessage("Compass display " + String(compassInverted ? "inverted" : "normal"));
 }
 
 void scanI2CDevices() {
@@ -1865,4 +1910,5 @@ void displayWorldMap() {
   
   display.display();
 }
+ 
  
