@@ -92,7 +92,7 @@ void displayGraphicCompass();
 void displayWorldMap();
 void calculateAndApplyCalibration(); // New calibration function
 void setDeclinationFromGPS(float lat, float lng); // Auto declination based on GPS position
-void applyPrivacyFilter(); // Add forward declaration for privacy filter
+void applyPrivacyFilter(); // Stub - Replaced by getLatitude() and getLongitude() wrappers
 
 // Add this function to draw a more prominent privacy indicator
 void drawPrivacyIndicator(Adafruit_SSD1306 &display) {
@@ -141,6 +141,7 @@ int calY[16]; // Stores calibration points (up to 16)
 float currentDeclination = 0.0f; // Current declination value in radians
 int calibrationModeIndex = 0; // Index for current selection in calibration mode
 bool isSettingAltitudeCorrection = false; // Flag for altitude correction mode
+bool privacyModeEnabled = false; // Flag to toggle privacy mode for coordinates
 
 // Calibration mode options
 const int NUM_CALIBRATION_MODES = 4; // 4-point, 8-point, 16-point, Cancel
@@ -173,7 +174,6 @@ DisplayMode currentDisplayMode = DisplayMode::GRAPHIC_COMPASS; // Start in graph
 // Variables to hold latest status for fixed display
 String latest_gps_status = "GPS: Initializing...";
 String latest_compass_raw = "Compass: Initializing...";
-bool privacyModeEnabled = false; // Flag to toggle privacy mode for coordinates
 
 // Preferences object and keys for storing calibration
 Preferences preferences;
@@ -290,83 +290,82 @@ bool compassStabilized = false; // Flag to indicate compass has stabilized after
 unsigned long compassStartupTime = 0; // Timestamp when compass initialization started
 const unsigned long COMPASS_STABILIZATION_TIME = 3000; // Wait 3 seconds for compass to stabilize
 
-// Privacy mode variables
-float privacyLat = 0.0f;  // Latitude after privacy filter is applied
-float privacyLng = 0.0f;  // Longitude after privacy filter is applied
+// Wrapper functions for GPS coordinates that apply privacy mask when needed
+float getLatitude() {
+  if (!gps.location.isValid()) {
+    return 0.0f;
+  }
+  
+  float rawLat = gps.location.lat();
+  
+  if (privacyModeEnabled) {
+    // Apply privacy mask - keep only first digit
+    float absLat = abs(rawLat);
+    int latInt = static_cast<int>(absLat);
+    String latStr = String(latInt);
+    
+    if (latInt == 0) {
+      // If latitude is less than 1, set to 0
+      return (rawLat < 0) ? -0.0f : 0.0f;
+    } else {
+      // Extract first digit and set rest to zeros
+      int firstDigit = (latStr.length() > 0) ? (latStr[0] - '0') : 0;
+      int zerosToAdd = latStr.length() - 1;
+      
+      // Reconstruct latitude with first digit only
+      float maskedLat = firstDigit;
+      for (int i = 0; i < zerosToAdd; i++) {
+        maskedLat *= 10;
+      }
+      
+      // Preserve sign
+      return (rawLat < 0) ? -maskedLat : maskedLat;
+    }
+  }
+  
+  // No privacy mode - return raw value
+  return rawLat;
+}
+
+float getLongitude() {
+  if (!gps.location.isValid()) {
+    return 0.0f;
+  }
+  
+  float rawLng = gps.location.lng();
+  
+  if (privacyModeEnabled) {
+    // Apply privacy mask - keep only first digit
+    float absLng = abs(rawLng);
+    int lngInt = static_cast<int>(absLng);
+    String lngStr = String(lngInt);
+    
+    if (lngInt == 0) {
+      // If longitude is less than 1, set to 0
+      return (rawLng < 0) ? -0.0f : 0.0f;
+    } else {
+      // Extract first digit and set rest to zeros
+      int firstDigit = (lngStr.length() > 0) ? (lngStr[0] - '0') : 0;
+      int zerosToAdd = lngStr.length() - 1;
+      
+      // Reconstruct longitude with first digit only
+      float maskedLng = firstDigit;
+      for (int i = 0; i < zerosToAdd; i++) {
+        maskedLng *= 10;
+      }
+      
+      // Preserve sign
+      return (rawLng < 0) ? -maskedLng : maskedLng;
+    }
+  }
+  
+  // No privacy mode - return raw value
+  return rawLng;
+}
 
 // Function to apply privacy filter to GPS coordinates
 void applyPrivacyFilter() {
-  // Only process if we have valid GPS data
-  if (gps.location.isValid()) {
-    float rawLat = gps.location.lat();
-    float rawLng = gps.location.lng();
-    
-    if (privacyModeEnabled) {
-      // Privacy mode: Transform coordinates to only keep first digit
-      
-      // Process latitude
-      float absLat = abs(rawLat);
-      int latInt = static_cast<int>(absLat);
-      String latStr = String(latInt);
-      
-      if (latInt == 0) {
-        // If latitude is less than 1, set to 0
-        privacyLat = (rawLat < 0) ? -0.0f : 0.0f;
-      } else {
-        // Extract first digit and set rest to zeros
-        int firstDigit = (latStr.length() > 0) ? (latStr[0] - '0') : 0;
-        int zerosToAdd = latStr.length() - 1;
-        
-        // Reconstruct latitude with first digit only
-        float maskedLat = firstDigit;
-        for (int i = 0; i < zerosToAdd; i++) {
-          maskedLat *= 10;
-        }
-        
-        // Preserve sign
-        privacyLat = (rawLat < 0) ? -maskedLat : maskedLat;
-      }
-      
-      // Process longitude
-      float absLng = abs(rawLng);
-      int lngInt = static_cast<int>(absLng);
-      String lngStr = String(lngInt);
-      
-      if (lngInt == 0) {
-        // If longitude is less than 1, set to 0
-        privacyLng = (rawLng < 0) ? -0.0f : 0.0f;
-      } else {
-        // Extract first digit and set rest to zeros
-        int firstDigit = (lngStr.length() > 0) ? (lngStr[0] - '0') : 0;
-        int zerosToAdd = lngStr.length() - 1;
-        
-        // Reconstruct longitude with first digit only
-        float maskedLng = firstDigit;
-        for (int i = 0; i < zerosToAdd; i++) {
-          maskedLng *= 10;
-        }
-        
-        // Preserve sign
-        privacyLng = (rawLng < 0) ? -maskedLng : maskedLng;
-      }
-      
-      // Log privacy transformation (occasionally)
-      static unsigned long lastPrivacyLog = 0;
-      if (millis() - lastPrivacyLog > 30000) { // Log every 30 seconds
-        lastPrivacyLog = millis();
-        logMessage("Privacy filter: " + String(rawLat, 6) + " -> " + String(privacyLat, 6) + 
-                  ", " + String(rawLng, 6) + " -> " + String(privacyLng, 6));
-      }
-    } else {
-      // No privacy mode: Use raw GPS data
-      privacyLat = rawLat;
-      privacyLng = rawLng;
-    }
-  } else {
-    // Invalid GPS: Set both to zero
-    privacyLat = 0.0f;
-    privacyLng = 0.0f;
-  }
+  // Function no longer needed - replaced by getLatitude() and getLongitude() wrappers
 }
 
 // UI State Management - Centralized Button Handling
@@ -1013,10 +1012,7 @@ void loop() {
     while (GPS.available()) {
       gps.encode(GPS.read());
     }
-    // Apply privacy filter AFTER processing GPS data
-    if (gps.location.isValid() && privacyModeEnabled) {
-    applyPrivacyFilter();
-    }
+    // No need to call applyPrivacyFilter anymore - the wrapper functions handle this
   }
 
   // Basic display update
@@ -1050,10 +1046,7 @@ void handleLongPressWorldMap() {
   privacyModeEnabled = !privacyModeEnabled;
   logMessage("Privacy mode " + String(privacyModeEnabled ? "enabled" : "disabled"));
   
-  // Apply filter immediately to update display values if GPS is valid
-  if (gps.location.isValid()) {
-    applyPrivacyFilter();
-  }
+  // No need to call applyPrivacyFilter anymore since we're using the wrapper functions
   
   // Force redraw of the world map to show/hide privacy indicator
   displayWorldMap();
@@ -1556,8 +1549,9 @@ void displayLogOnOLED() {
   
   // Display Lat, Lng, and Sat (updated every display cycle)
   if (gps.location.isValid()) {
-    float lat = gps.location.lat();
-    float lng = gps.location.lng();
+    // Use wrapper functions that handle privacy masking
+    float lat = getLatitude();
+    float lng = getLongitude();
     
     display.setCursor(0, 20); // Adjusted Y position
     display.print("Lat ");
@@ -1610,6 +1604,11 @@ void displayLogOnOLED() {
     // Removed "km/h" to save space
   }
 
+  // Draw privacy indicator if privacy mode is enabled
+  if (privacyModeEnabled) {
+    drawPrivacyIndicator(display);
+  }
+  
   display.display();
 }
 
@@ -1919,8 +1918,9 @@ void displayGraphicCompass() {
   }
   
   if (gps.location.isValid()) {
-    float lat = gps.location.lat();
-    float lng = gps.location.lng();
+    // Use privacy-filtered coordinates via wrapper functions
+    float lat = getLatitude(); 
+    float lng = getLongitude();
     
     display.setCursor(0, SCREEN_HEIGHT - 16);
     display.println("Lat");
@@ -1957,6 +1957,10 @@ void displayGraphicCompass() {
     display.println(noFix);
   }
   
+  // Draw privacy indicator if privacy mode is enabled
+  if (privacyModeEnabled) {
+    drawPrivacyIndicator(display);
+  }
 
   display.display();
 }
@@ -1969,16 +1973,9 @@ void displayWorldMap() {
   display.drawBitmap(0, 0, world_map, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
   
   if (gps.location.isValid()) {
-    float lat = gps.location.lat();
-    float lng = gps.location.lng();
-    
-    // Apply privacy mode filter if enabled
-    if (privacyModeEnabled) {
-      // Use the privacy-filtered values
-      applyPrivacyFilter();
-      lat = privacyLat;
-      lng = privacyLng;
-    }
+    // Use the wrapper functions that handle privacy mode automatically
+    float lat = getLatitude();
+    float lng = getLongitude();
     
     int posX = (int)((lng + 180.0) / 360.0 * SCREEN_WIDTH);
     
