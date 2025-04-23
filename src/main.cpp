@@ -92,6 +92,7 @@ void displayGraphicCompass();
 void displayWorldMap();
 void calculateAndApplyCalibration(); // New calibration function
 void setDeclinationFromGPS(float lat, float lng); // Auto declination based on GPS position
+void applyPrivacyFilter(); // Add forward declaration for privacy filter
 
 // Add this function to draw a more prominent privacy indicator
 void drawPrivacyIndicator(Adafruit_SSD1306 &display) {
@@ -1007,6 +1008,17 @@ void loop() {
     activeCompass->read();
   }
 
+  // Process any available GPS data
+  if (gpsInitialized) {
+    while (GPS.available()) {
+      gps.encode(GPS.read());
+    }
+    // Apply privacy filter AFTER processing GPS data
+    if (gps.location.isValid() && privacyModeEnabled) {
+    applyPrivacyFilter();
+    }
+  }
+
   // Basic display update
   if (display_initialized) {
     switch (currentDisplayMode) {
@@ -1024,13 +1036,6 @@ void loop() {
         break;
     }
   }
-
-  // Process any available GPS data
-  if (gpsInitialized) {
-    while (GPS.available()) {
-      gps.encode(GPS.read());
-    }
-  }
 }
 
 // World Map Screen
@@ -1044,6 +1049,14 @@ void handleLongPressWorldMap() {
   // Toggle privacy mode
   privacyModeEnabled = !privacyModeEnabled;
   logMessage("Privacy mode " + String(privacyModeEnabled ? "enabled" : "disabled"));
+  
+  // Apply filter immediately to update display values if GPS is valid
+  if (gps.location.isValid()) {
+    applyPrivacyFilter();
+  }
+  
+  // Force redraw of the world map to show/hide privacy indicator
+  displayWorldMap();
 }
 
 // Altitude Correction Mode
@@ -1959,6 +1972,14 @@ void displayWorldMap() {
     float lat = gps.location.lat();
     float lng = gps.location.lng();
     
+    // Apply privacy mode filter if enabled
+    if (privacyModeEnabled) {
+      // Use the privacy-filtered values
+      applyPrivacyFilter();
+      lat = privacyLat;
+      lng = privacyLng;
+    }
+    
     int posX = (int)((lng + 180.0) / 360.0 * SCREEN_WIDTH);
     
     if (lat > 85.0) lat = 85.0;
@@ -1999,6 +2020,11 @@ void displayWorldMap() {
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(2, SCREEN_HEIGHT - 8);
     display.print("No Fix");
+  }
+  
+  // Draw privacy indicator (lock icon) when privacy mode is enabled
+  if (privacyModeEnabled) {
+    drawPrivacyIndicator(display);
   }
   
   display.display();
