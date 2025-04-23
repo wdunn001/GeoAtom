@@ -560,7 +560,15 @@ void setup() {
   delay(300); // Wait for GPS module to be ready for commands
   GPSConfigurator gpsConfig(GPS);
 
-  // 1. Set Update Rate to 10Hz
+  // First set baud rate to 9600
+  if (gpsConfig.setBaudRate(9600)) {
+      logMessage("GPS: Set baud rate to 9600.");
+  } else {
+      logMessage("GPS: Failed to set baud rate to 9600.");
+  }
+  delay(100); // Small delay between commands
+
+  // Set Update Rate to 10Hz
   if (gpsConfig.setUpdateRateHz(10)) {
       logMessage("GPS: Set update rate to 10 Hz.");
   } else {
@@ -568,15 +576,7 @@ void setup() {
   }
   delay(100); // Small delay between commands
 
-  // 2. Set Dynamic Model to Portable (0)
-  if (gpsConfig.setDynamicModel(0)) {
-      logMessage("GPS: Set dynamic model to Portable.");
-  } else {
-      logMessage("GPS: Failed to set dynamic model.");
-  }
-  delay(100); // Small delay between commands
-
-  // 3. Save configuration to make it persistent
+  // Save configuration to make it persistent
   if (gpsConfig.saveConfiguration()) {
       logMessage("GPS: Configuration saved to NVM.");
   } else {
