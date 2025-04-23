@@ -553,12 +553,85 @@ void setup() {
 
   // Initialize Host serial for debug
   Host.begin(9600, SERIAL_8N1, HOST_RX, HOST_TX);
+  logMessage("System initializing...");
+
+  // --- Initialize GPS with Configuration --- 
+  logMessage("Initializing GPS module...");
+  gpsBaudRate = 9600; // Start with default baud rate
+  bool gpsInitSuccess = false; // **** THIS IS THE ONLY DECLARATION ****
+
+  // Basic GPS serial start needed before configuration
+  GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
+  delay(100); // Small delay for serial port
+
+  if (GPS) { // Check if serial port opened successfully
+    logMessage("GPS Serial Port OK. Configuring NMEA...");
+    GPSConfigurator gpsConfig(GPS);
+    // bool configSuccess = true; // Local variable, not needed for this logic flow
+
+    // Set update rate to 10Hz
+    if (!gpsConfig.setUpdateRateHz(10)) {
+      logMessage("Failed to set GPS update rate (continuing)");
+    }
+    delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
+
+    // Set dynamic model to Portable (0)
+    if (!gpsConfig.setDynamicModel(0)) {
+      logMessage("Failed to set GPS dynamic model (continuing)");
+    }
+    delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
+
+    // Enable essential NMEA messages (GGA, RMC, VTG, GSA, GSV, GLL)
+    logMessage("Enabling NMEA Messages...");
+    const uint8_t nmeaClass = 0xF0;
+    const uint8_t msgIds[] = {0x00, 0x04, 0x05, 0x02, 0x03, 0x01};
+    const char* msgNames[] = {"GGA", "RMC", "VTG", "GSA", "GSV", "GLL"};
+    bool nmeaConfigSuccess = true;
+
+    for (size_t i = 0; i < sizeof(msgIds) / sizeof(msgIds[0]); ++i) {
+        logMessage("  Enabling " + String(msgNames[i]) + "...");
+        if (!gpsConfig.enableNmeaMessage(nmeaClass, msgIds[i], true)) {
+            logMessage("    -> Failed to enable " + String(msgNames[i]));
+            nmeaConfigSuccess = false;
+        }
+        delay(GPS_CONFIG_RETRY_DELAY / 2); 
+    }
+
+    if (!nmeaConfigSuccess) {
+        logMessage("Warning: Failed to enable one or more NMEA messages.");
+    }
+
+    logMessage("Attempting to save GPS configuration...");
+    if (gpsConfig.saveConfiguration()) {
+      logMessage("GPS configuration save command sent.");
+      gpsInitSuccess = true; // Assign value to the single variable
+    } else {
+      logMessage("Failed to send save GPS configuration command.");
+      // Keep gpsInitSuccess as false if save fails
+    }
+
+  } else {
+    logMessage("*** ERROR: Failed to open GPS Serial Port! ***");
+    gpsInitSuccess = false; // Assign value to the single variable
+  }
+
+  gpsInitialized = gpsInitSuccess; // Use the single variable here
+  if (gpsInitialized) {
+      logMessage("GPS initialization sequence complete (check logs for details).");
+  } else {
+      logMessage("*** WARNING: GPS initialization sequence failed or incomplete. ***");
+  }
+  // --- End GPS Initialization ---
 
   // Try to initialize compass
   if (qmcCompass.begin()) {
-    activeCompass = &qmcCompass;
+      activeCompass = &qmcCompass;
+      logMessage("QMC5883L Initialized");
   } else if (hmcCompass.begin()) {
-    activeCompass = &hmcCompass;
+      activeCompass = &hmcCompass;
+      logMessage("HMC5883L Initialized");
+  } else {
+      logMessage("Compass Init Failed");
   }
 
   // Load preferences OR apply defaults
@@ -778,8 +851,7 @@ void setup() {
   gpsBaudRate = 9600;  // Start with default baud rate
   
   uint8_t initAttempts = 0;
-  bool gpsInitSuccess = false;
-  
+ 
   while (!gpsInitSuccess && initAttempts < MAX_GPS_INIT_RETRIES) {
     initAttempts++;
     logMessage("GPS init attempt " + String(initAttempts) + " of " + String(MAX_GPS_INIT_RETRIES));
@@ -1420,7 +1492,12 @@ void updateDisplay(float lat, float lng, float alt, int heading) {
 void displayLogOnOLED() {
   if (!display_initialized) return;
 
-  display.clearDisplay();
+  // Use static variables to hold the protocol string and its last update time
+  static String displayedGpsProtocol = "Initializing...";
+  static unsigned long lastProtocolUpdate = 0;
+  const unsigned long PROTOCOL_UPDATE_INTERVAL = 5000; // 5 seconds
+
+  display.clearDisplay(); 
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
@@ -1432,76 +1509,84 @@ void displayLogOnOLED() {
   display.setCursor((SCREEN_WIDTH - w) / 2, 0);
   display.println(title);
 
-  // Display GPS data format with dynamic sentence types
-  String gpsProtocol = "";
-  if (gps.charsProcessed() > 0) {
-    if (gps.location.isUpdated()) gpsProtocol += "GGA ";
-    if (gps.date.isUpdated() || gps.time.isUpdated()) gpsProtocol += "RMC ";
-    if (gps.course.isUpdated()) gpsProtocol += "VTG ";
-    if (gps.satellites.isUpdated()) gpsProtocol += "GSV ";
-    if (gpsProtocol.length() == 0) gpsProtocol = "NMEA";
-    gpsProtocol += String(gpsBaudRate);
-  } else {
-    gpsProtocol = "No GPS data";
+  // Update GPS protocol string only every 5 seconds
+  if (millis() - lastProtocolUpdate >= PROTOCOL_UPDATE_INTERVAL) {
+    lastProtocolUpdate = millis();
+    if (gps.charsProcessed() > 0) {
+      String tempProtocol = "";
+      if (gps.location.isUpdated()) tempProtocol += "GGA ";
+      if (gps.date.isUpdated() || gps.time.isUpdated()) tempProtocol += "RMC ";
+      if (gps.course.isUpdated()) tempProtocol += "VTG ";
+      if (gps.satellites.isUpdated()) tempProtocol += "GSV "; // Added check for GSV
+      if (gps.hdop.isValid()) tempProtocol += "GSA "; // Added check for GSA
+      // GLL might not have a direct TinyGPS++ updated flag, assume active if others are
+      if (tempProtocol.length() > 0) tempProtocol += "GLL "; 
+      
+      if (tempProtocol.length() == 0) tempProtocol = "NMEA";
+      displayedGpsProtocol = tempProtocol + String(gpsBaudRate);
+    } else {
+      displayedGpsProtocol = "No GPS data";
+    }
   }
   
-  display.setCursor(0, 8);
-  display.println(gpsProtocol);
+  // Display the potentially cached protocol string
+  display.setCursor(0, 10); // Adjusted Y position for better spacing
+  display.println(displayedGpsProtocol);
   
-  // Display Lat, Lng, and Sat
+  // Display Lat, Lng, and Sat (updated every display cycle)
   if (gps.location.isValid()) {
     float lat = gps.location.lat();
     float lng = gps.location.lng();
     
-    display.setCursor(0, 16);
+    display.setCursor(0, 20); // Adjusted Y position
     display.print("Lat ");
     display.println(lat, 5);
     
-    display.setCursor(0, 24);
+    display.setCursor(0, 28); // Adjusted Y position
     display.print("Lng ");
     display.println(lng, 5);
   } else {
-    display.setCursor(0, 16);
+    display.setCursor(0, 20); // Adjusted Y position
     display.println("Lat No Fix");
-    display.setCursor(0, 24);
+    display.setCursor(0, 28); // Adjusted Y position
     display.println("Lng No Fix");
   }
   
   // Display satellite count
-  display.setCursor(0, 32);
+  display.setCursor(0, 36); // Adjusted Y position
   display.print("Sat ");
   display.println(gps.satellites.value());
   
-  // Add NMEA stats
-  display.setCursor(0, 40);
-  display.print("NMEA: OK=");
-  display.print(gps.passedChecksum());
-  display.print(" Err=");
-  display.println(gps.failedChecksum());
-
   // Display altitude with correction
   if (gps.altitude.isValid()) {
     float correctedAlt = gps.altitude.meters() + altitudeCorrection;
-    display.setCursor(64, 32);
+    display.setCursor(64, 36); // Adjusted X position
     display.print("Alt ");
     display.print(correctedAlt, 0);
     display.println("m");
   }
 
+  // Display NMEA stats 
+  display.setCursor(0, 44); // Adjusted Y position
+  display.print("NMEA OK=");
+  display.print(gps.passedChecksum());
+  display.print(" Err=");
+  display.println(gps.failedChecksum());
+
   // Display course and speed
   if (gps.course.isValid() && gps.speed.isValid()) {
-    display.setCursor(0, 48);
+    display.setCursor(0, 52); // Adjusted Y position
     display.print("Course: ");
     display.print(gps.course.deg());
-    display.println(" deg"); // Changed from degree symbol
+    display.println(" deg");
     
-    display.setCursor(0, 56);
-    display.print("Speed: ");
+    display.setCursor(64, 52); // Adjusted X position for speed
+    display.print("Spd: ");
     float speedKmph = gps.speed.kmph();
     bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
     if (!reliableSpeed || speedKmph < 3.0) speedKmph = 0;
     display.print(speedKmph, 1);
-    display.println(" km/h");
+    // Removed "km/h" to save space
   }
 
   display.display();
