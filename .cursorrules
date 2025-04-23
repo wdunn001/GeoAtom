@@ -37,6 +37,9 @@
       "Try forcing linter refresh: Save all files, close/reopen file, restart language server, or add/fix a temporary syntax error",
       "For persistent linter errors with correct code, document the issue in comments and proceed if compilation succeeds",
       "Make significant changes to problematic lines (rearrange, rename) to break cache dependencies if linter remains stuck"
+    ],
+    "workflow": [
+      "Build the project after making code changes before attempting to fix newly appeared linter errors, as they might be due to build state or cache issues."
     ]
   }
 } 

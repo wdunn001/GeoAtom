@@ -251,6 +251,15 @@ private:
     bool _initialized = false;
     sensors_event_t _last_event;
     float _declination_rad = 0.0f; // Default declination correction (0 = none)
+    
+    // Add calibration parameters
+    float _x_offset = 0.0f;
+    float _y_offset = 0.0f;
+    float _z_offset = 0.0f;
+    float _x_scale = 1.0f;
+    float _y_scale = 1.0f;
+    float _z_scale = 1.0f;
+    bool _calibration_valid = false;
 
 public:
     HMC5883LCompassImpl(int32_t sensor_id = 12345) : _hmc(sensor_id) {
@@ -274,7 +283,18 @@ public:
     
     bool read() override {
         if (!_initialized) return false;
-        return _hmc.getEvent(&_last_event);
+        
+        bool success = _hmc.getEvent(&_last_event);
+        
+        // Apply calibration if valid
+        if (success && _calibration_valid) {
+            // Apply offset and scale corrections
+            _last_event.magnetic.x = (_last_event.magnetic.x - _x_offset) * _x_scale;
+            _last_event.magnetic.y = (_last_event.magnetic.y - _y_offset) * _y_scale;
+            _last_event.magnetic.z = (_last_event.magnetic.z - _z_offset) * _z_scale;
+        }
+        
+        return success;
     }
     
     int getAzimuth() override {
@@ -330,31 +350,90 @@ public:
     }
     
     bool supportsCalibration() override {
-        // The Adafruit library doesn't have built-in calibration methods
-        // We could implement hard-iron offset compensation manually, but it's not as simple
-        return false;
+        // Now we support calibration for HMC5883L
+        return true;
     }
     
     bool setCalibrationOffsets(float x_offset, float y_offset, float z_offset) override {
-        // Not directly supported by Adafruit library, would need to be implemented manually
-        return false;
+        if (!_initialized) return false;
+        
+        _x_offset = x_offset;
+        _y_offset = y_offset;
+        _z_offset = z_offset;
+        _calibration_valid = true;
+        
+        return true;
     }
     
     bool setCalibrationScales(float x_scale, float y_scale, float z_scale) override {
-        // Not directly supported by Adafruit library
-        return false;
+        if (!_initialized) return false;
+        
+        _x_scale = x_scale;
+        _y_scale = y_scale;
+        _z_scale = z_scale;
+        _calibration_valid = true;
+        
+        return true;
     }
     
     bool calculateCalibration(int* pointsX, int* pointsY) override {
-        // Not supported for this implementation
-        return false;
+        if (!_initialized) return false;
+        
+        // Calculate calibration from multiple points similar to QMC5883L
+        float x_min = pointsX[0], x_max = pointsX[0];
+        float y_min = pointsY[0], y_max = pointsY[0];
+        
+        // Find min/max values for X and Y
+        int numPoints = 8; // Default to 8 points
+        if (pointsX[15] != 0 || pointsY[15] != 0) numPoints = 16;
+        else if (pointsX[7] == 0 && pointsY[7] == 0) numPoints = 4;
+        
+        for (int i = 1; i < numPoints; i++) {
+            if (pointsX[i] < x_min) x_min = pointsX[i];
+            if (pointsX[i] > x_max) x_max = pointsX[i];
+            if (pointsY[i] < y_min) y_min = pointsY[i];
+            if (pointsY[i] > y_max) y_max = pointsY[i];
+        }
+        
+        // Calculate center offset (ellipse center)
+        _x_offset = (x_max + x_min) / 2.0f;
+        _y_offset = (y_max + y_min) / 2.0f;
+        _z_offset = 0; // Z offset calculation would require 3D calibration
+        
+        // Calculate scaling factors to transform ellipse to circle
+        float x_delta = (x_max - x_min) / 2.0f;
+        float y_delta = (y_max - y_min) / 2.0f;
+        
+        // Avoid division by zero
+        if (x_delta <= 0 || y_delta <= 0) {
+            return false;
+        }
+        
+        // Use average delta as the target circle radius
+        float avg_delta = (x_delta + y_delta) / 2.0f;
+        
+        // Calculate scales to normalize axes to the same circle
+        _x_scale = avg_delta / x_delta;
+        _y_scale = avg_delta / y_delta;
+        _z_scale = 1.0f; // Z scale unchanged
+        
+        _calibration_valid = true;
+        
+        return true;
     }
     
     String getSensorInfoString() override {
         if (!_initialized) return "HMC5883L: not initialized";
-        return "HMC5883L: X=" + String(_last_event.magnetic.x) + 
+        
+        String info = "HMC5883L: X=" + String(_last_event.magnetic.x) + 
                " Y=" + String(_last_event.magnetic.y) + 
                " Z=" + String(_last_event.magnetic.z) + " uT";
+               
+        if (_calibration_valid) {
+            info += " [Cal]";
+        }
+        
+        return info;
     }
     
     const char* getSensorName() override {

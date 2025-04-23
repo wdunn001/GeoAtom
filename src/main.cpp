@@ -7,6 +7,7 @@
 #include <String>
 #include <Preferences.h>
 #include "GPS_Configurator.h"
+#include <map> // Add for std::map
 
 // Include SSD1306 display libraries
 #include <Wire.h>
@@ -78,7 +79,8 @@ static const unsigned char world_map[] PROGMEM = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00
 };
 
 // Forward declarations for custom functions
@@ -91,12 +93,36 @@ void displayWorldMap();
 void calculateAndApplyCalibration(); // New calibration function
 void setDeclinationFromGPS(float lat, float lng); // Auto declination based on GPS position
 
+// Add this function to draw a more prominent privacy indicator
+void drawPrivacyIndicator(Adafruit_SSD1306 &display) {
+  extern bool privacyModeEnabled; // Fix linter error by adding external declaration
+  
+  if (privacyModeEnabled) {
+    // Draw a padlock icon at top-right corner
+    int x = display.width() - 10;
+    int y = 2;
+    
+    // Lock body
+    display.fillRect(x, y + 3, 8, 6, SSD1306_WHITE);
+    
+    // Lock shackle
+    display.drawRect(x + 1, y, 6, 4, SSD1306_WHITE);
+    
+    // Optional: "P" for privacy
+    display.drawPixel(x + 2, y + 5, SSD1306_BLACK);
+    display.drawPixel(x + 3, y + 4, SSD1306_BLACK);
+    display.drawPixel(x + 4, y + 5, SSD1306_BLACK);
+    display.drawPixel(x + 3, y + 6, SSD1306_BLACK);
+    display.drawPixel(x + 2, y + 7, SSD1306_BLACK);
+  }
+}
+
 // GPS setup
 TinyGPSPlus gps;
 HardwareSerial GPS(1);  // Using UART1 for GPS
 HardwareSerial Host(2); // Using UART2 for NMEA forwarding to PC/TTL converter
 unsigned long gpsBaudRate = 0; // Variable to store GPS baud rate
-int altitudeCorrection = 1000; // Altitude correction factor in meters
+int altitudeCorrection = 0; // Altitude correction factor in meters - Set to 0
 
 // Replace old compass setup with interface pointer 
 CompassInterface* activeCompass = nullptr;
@@ -112,7 +138,8 @@ int calibrationPoints = 8; // Default to 8-point calibration
 int calX[16]; // Stores calibration points (up to 16)
 int calY[16]; // Stores calibration points (up to 16)
 float currentDeclination = 0.0f; // Current declination value in radians
-int calibrationModeIndex = 0; // Index for current selection in calibration mode menu
+int calibrationModeIndex = 0; // Index for current selection in calibration mode
+bool isSettingAltitudeCorrection = false; // Flag for altitude correction mode
 
 // Calibration mode options
 const int NUM_CALIBRATION_MODES = 4; // 4-point, 8-point, 16-point, Cancel
@@ -145,6 +172,7 @@ DisplayMode currentDisplayMode = DisplayMode::GRAPHIC_COMPASS; // Start in graph
 // Variables to hold latest status for fixed display
 String latest_gps_status = "GPS: Initializing...";
 String latest_compass_raw = "Compass: Initializing...";
+bool privacyModeEnabled = false; // Flag to toggle privacy mode for coordinates
 
 // Preferences object and keys for storing calibration
 Preferences preferences;
@@ -158,6 +186,14 @@ const char* KEY_Y_SCALE = "yScale";
 const char* KEY_Z_SCALE = "zScale";
 const char* KEY_DECLINATION = "declRad"; // New key for declination
 const char* KEY_COMPASS_INVERTED = "compInv"; // New key for compass inversion
+const char* KEY_ALT_CORRECTION = "altCorr"; // Key for altitude correction
+const char* KEY_HMC_CAL_VALID = "hmcCalValid"; // Key for HMC calibration validity
+const char* KEY_HMC_X_OFFSET = "hmcXOffset"; // Key for HMC X offset
+const char* KEY_HMC_Y_OFFSET = "hmcYOffset"; // Key for HMC Y offset
+const char* KEY_HMC_Z_OFFSET = "hmcZOffset"; // Key for HMC Z offset
+const char* KEY_HMC_X_SCALE = "hmcXScale"; // Key for HMC X scale
+const char* KEY_HMC_Y_SCALE = "hmcYScale"; // Key for HMC Y scale
+const char* KEY_HMC_Z_SCALE = "hmcZScale"; // Key for HMC Z scale
 
 // Pin definitions based on physical connections
 // --- Verified Working Configuration for BN-880 & M5Atom Echo ---
@@ -232,8 +268,273 @@ void setDeclinationFromGPS(float lat, float lng) {
   }
 }
 
+// Add these declarations with other global variables
+float smoothedHeading = 0.0f;  // Smoothed compass heading
+const float ALPHA = 0.15f;     // Smoothing factor (0.0-1.0): lower = more smoothing, higher = more responsive
+// Compass raw value smoothing
+int smoothedCompassX = 0;      // Smoothed compass X value
+int smoothedCompassY = 0;      // Smoothed compass Y value 
+int smoothedCompassZ = 0;      // Smoothed compass Z value
+const float COMPASS_XYZ_ALPHA = 0.2f; // Smoothing factor for raw compass values
+bool compassValuesInitialized = false; // Flag to initialize compass values
+bool compassStabilized = false; // Flag to indicate compass has stabilized after startup
+unsigned long compassStartupTime = 0; // Timestamp when compass initialization started
+const unsigned long COMPASS_STABILIZATION_TIME = 3000; // Wait 3 seconds for compass to stabilize
+
+// Privacy mode variables
+float privacyLat = 0.0f;  // Latitude after privacy filter is applied
+float privacyLng = 0.0f;  // Longitude after privacy filter is applied
+
+// Function to apply privacy filter to GPS coordinates
+void applyPrivacyFilter() {
+  // Only process if we have valid GPS data
+  if (gps.location.isValid()) {
+    float rawLat = gps.location.lat();
+    float rawLng = gps.location.lng();
+    
+    if (privacyModeEnabled) {
+      // Privacy mode: Transform coordinates to only keep first digit
+      
+      // Process latitude
+      float absLat = abs(rawLat);
+      int latInt = static_cast<int>(absLat);
+      String latStr = String(latInt);
+      
+      if (latInt == 0) {
+        // If latitude is less than 1, set to 0
+        privacyLat = (rawLat < 0) ? -0.0f : 0.0f;
+      } else {
+        // Extract first digit and set rest to zeros
+        int firstDigit = (latStr.length() > 0) ? (latStr[0] - '0') : 0;
+        int zerosToAdd = latStr.length() - 1;
+        
+        // Reconstruct latitude with first digit only
+        float maskedLat = firstDigit;
+        for (int i = 0; i < zerosToAdd; i++) {
+          maskedLat *= 10;
+        }
+        
+        // Preserve sign
+        privacyLat = (rawLat < 0) ? -maskedLat : maskedLat;
+      }
+      
+      // Process longitude
+      float absLng = abs(rawLng);
+      int lngInt = static_cast<int>(absLng);
+      String lngStr = String(lngInt);
+      
+      if (lngInt == 0) {
+        // If longitude is less than 1, set to 0
+        privacyLng = (rawLng < 0) ? -0.0f : 0.0f;
+      } else {
+        // Extract first digit and set rest to zeros
+        int firstDigit = (lngStr.length() > 0) ? (lngStr[0] - '0') : 0;
+        int zerosToAdd = lngStr.length() - 1;
+        
+        // Reconstruct longitude with first digit only
+        float maskedLng = firstDigit;
+        for (int i = 0; i < zerosToAdd; i++) {
+          maskedLng *= 10;
+        }
+        
+        // Preserve sign
+        privacyLng = (rawLng < 0) ? -maskedLng : maskedLng;
+      }
+      
+      // Log privacy transformation (occasionally)
+      static unsigned long lastPrivacyLog = 0;
+      if (millis() - lastPrivacyLog > 30000) { // Log every 30 seconds
+        lastPrivacyLog = millis();
+        logMessage("Privacy filter: " + String(rawLat, 6) + " -> " + String(privacyLat, 6) + 
+                  ", " + String(rawLng, 6) + " -> " + String(privacyLng, 6));
+      }
+    } else {
+      // No privacy mode: Use raw GPS data
+      privacyLat = rawLat;
+      privacyLng = rawLng;
+    }
+  } else {
+    // Invalid GPS: Set both to zero
+    privacyLat = 0.0f;
+    privacyLng = 0.0f;
+  }
+}
+
+// UI State Management - Centralized Button Handling
+// Define all possible UI states
+enum class UIState {
+  // Main display modes
+  GPS_STATUS_SCREEN,
+  COMPASS_STATUS_SCREEN,
+  GRAPHIC_COMPASS_SCREEN,
+  WORLD_MAP_SCREEN,
+  
+  // Configuration modes
+  ALTITUDE_CORRECTION_MODE,
+  CALIBRATION_MODE_SELECTION,
+  CALIBRATING_COMPASS,
+  SETTING_DECLINATION,
+  SETTING_INVERSION
+};
+
+// Current UI state
+UIState currentUIState = UIState::GRAPHIC_COMPASS_SCREEN;
+
+// Function to get the current UI state based on display mode and flags
+UIState determineCurrentUIState() {
+  // First determine if we're in a special mode
+  // Use a single variable to hold the current mode state
+  UIState detectedState;
+  
+  // Use a switch to determine the state based on configuration flags
+  // Configuration modes take precedence over display modes
+  if (isSettingAltitudeCorrection) {
+    detectedState = UIState::ALTITUDE_CORRECTION_MODE;
+  }
+  else if (isSelectingCalibrationMode) {
+    detectedState = UIState::CALIBRATION_MODE_SELECTION;
+  }
+  else if (isCalibrating) {
+    detectedState = UIState::CALIBRATING_COMPASS;
+  }
+  else if (isSettingDeclination) {
+    detectedState = UIState::SETTING_DECLINATION;
+  }
+  else if (isSettingInversion) {
+    detectedState = UIState::SETTING_INVERSION;
+  }
+  else {
+    // Not in configuration mode, so use display mode
+    switch (currentDisplayMode) {
+      case DisplayMode::GPS_STATUS:
+        detectedState = UIState::GPS_STATUS_SCREEN;
+        break;
+      case DisplayMode::COMPASS_STATUS:
+        detectedState = UIState::COMPASS_STATUS_SCREEN;
+        break;
+      case DisplayMode::GRAPHIC_COMPASS:
+        detectedState = UIState::GRAPHIC_COMPASS_SCREEN;
+        break;
+      case DisplayMode::WORLD_MAP:
+        detectedState = UIState::WORLD_MAP_SCREEN;
+        break;
+      default:
+        detectedState = UIState::GRAPHIC_COMPASS_SCREEN;
+        break;
+    }
+  }
+  
+  return detectedState;
+}
+
+// Function prototypes for button handlers
+void handleShortPressGPSStatus();
+void handleLongPressGPSStatus();
+void handleShortPressCompassStatus();
+void handleLongPressCompassStatus();
+void handleShortPressGraphicCompass();
+void handleLongPressGraphicCompass();
+void handleShortPressWorldMap();
+void handleLongPressWorldMap();
+void handleShortPressAltitudeCorrection();
+void handleLongPressAltitudeCorrection();
+void handleShortPressCalibrationModeSelection();
+void handleLongPressCalibrationModeSelection();
+void handleShortPressCalibrating();
+void handleLongPressCalibrating();
+void handleShortPressDeclination();
+void handleLongPressDeclination();
+void handleShortPressInversion();
+void handleLongPressInversion();
+
+// Before the loop() function, add a new debugging variable to diagnose compass issues
+bool enableCompassDebug = true;   // Set to true to output detailed compass diagnostics
+unsigned long lastCompassDebugOutput = 0; // Timestamp for last compass debug output
+
+// Compass interference mitigation
+// Configuration flags - these can be toggled in settings
+bool enableOutlierRejection = true;      // Reject sudden large jumps in heading
+bool enableNoiseThreshold = true;        // Ignore small changes below threshold
+bool enableGpsFusion = true;             // Blend GPS course when moving
+bool enableMagneticInterference = true;  // Detect and compensate for interference
+
+// Constants for interference mitigation
+const int MAX_HEADING_JUMP = 60;           // Increased from 30 to 60 degrees - Maximum allowed heading change in degrees per reading
+const int HEADING_NOISE_THRESHOLD = 3;     // Degrees - changes smaller than this are ignored
+const float MIN_GPS_CONFIDENCE = 0.7;      // Minimum confidence to start using GPS course
+const float MAGNETIC_VARIANCE_THRESHOLD = 2000.0; // Threshold for magnetic field variance indicating interference
+
+// Runtime variables for interference detection
+bool lastHeadingValid = false;             // Flag for first reading
+bool highInterferenceDetected = false;     // Current interference status
+bool usingGpsCourse = false;               // Whether GPS course is currently being used
+bool fastTurningDetected = false;          // Flag for fast turning detection
+float turningRate = 0.0f;                  // Detected turning rate in degrees per second
+
+// Keys for storing interference mitigation settings
+const char* KEY_OUTLIER_REJECTION = "outRej";
+const char* KEY_NOISE_THRESHOLD = "noiseThresh";
+const char* KEY_GPS_FUSION = "gpsFusion";
+const char* KEY_MAG_INTERFERENCE = "magInt";
+
+// GPS smoothing variables
+float smoothedGpsSpeed = 0.0f;   // Smoothed GPS speed in km/h
+float smoothedGpsCourse = 0.0f;  // Smoothed GPS course in degrees
+const float GPS_SPEED_ALPHA = 0.2f;   // GPS speed smoothing factor
+const float GPS_COURSE_ALPHA_MIN = 0.05f; // Course smoothing at low speeds
+const float GPS_COURSE_ALPHA_MAX = 0.3f;  // Course smoothing at high speeds
+const float GPS_SPEED_MIN = 3.0f;  // Minimum speed in km/h to consider course reliable
+const float GPS_SPEED_MAX = 20.0f; // Speed at which to use max course alpha
+
+// Update timing constants for optimal performance
+const unsigned long COMPASS_SAMPLE_INTERVAL = 10;   // Sample compass at 100Hz (10ms)
+const unsigned long DISPLAY_UPDATE_INTERVAL = 33;   // Update display at 30Hz (33ms)
+
+// Forward declarations for handler functions
+void handleShortPressGPSStatus();
+void handleLongPressGPSStatus();
+void handleShortPressCompassStatus();
+void handleLongPressCompassStatus();
+void handleShortPressGraphicCompass();
+void handleLongPressGraphicCompass();
+void handleShortPressWorldMap();
+void handleLongPressWorldMap();
+void handleShortPressAltitudeCorrection();
+void handleLongPressAltitudeCorrection();
+void handleShortPressCalibrationModeSelection();
+void handleLongPressCalibrationModeSelection();
+void handleShortPressCalibrating();
+void handleLongPressCalibrating();
+void handleShortPressDeclination();
+void handleLongPressDeclination();
+void handleShortPressInversion();
+void handleLongPressInversion();
+
+// Define a type for button handler functions for clarity
+typedef void (*ButtonHandlerFunc)();
+
+// Define a struct to hold both short and long press handlers
+struct ButtonHandlers {
+    ButtonHandlerFunc shortPressHandler;
+    ButtonHandlerFunc longPressHandler;
+};
+
+// Create a map from UIState to button handlers
+std::map<UIState, ButtonHandlers> buttonHandlerMap;
+
 void setup() {
   delay(1000);  // Give peripherals time to initialize
+  
+  // Initialize the button handler map
+  buttonHandlerMap[UIState::GPS_STATUS_SCREEN] = {handleShortPressGPSStatus, handleLongPressGPSStatus};
+  buttonHandlerMap[UIState::COMPASS_STATUS_SCREEN] = {handleShortPressCompassStatus, handleLongPressCompassStatus};
+  buttonHandlerMap[UIState::GRAPHIC_COMPASS_SCREEN] = {handleShortPressGraphicCompass, handleLongPressGraphicCompass};
+  buttonHandlerMap[UIState::WORLD_MAP_SCREEN] = {handleShortPressWorldMap, handleLongPressWorldMap};
+  buttonHandlerMap[UIState::ALTITUDE_CORRECTION_MODE] = {handleShortPressAltitudeCorrection, handleLongPressAltitudeCorrection};
+  buttonHandlerMap[UIState::CALIBRATION_MODE_SELECTION] = {handleShortPressCalibrationModeSelection, handleLongPressCalibrationModeSelection};
+  buttonHandlerMap[UIState::CALIBRATING_COMPASS] = {handleShortPressCalibrating, handleLongPressCalibrating};
+  buttonHandlerMap[UIState::SETTING_DECLINATION] = {handleShortPressDeclination, handleLongPressDeclination};
+  buttonHandlerMap[UIState::SETTING_INVERSION] = {handleShortPressInversion, handleLongPressInversion};
   
   // Initialize I2C with appropriate frequency for reliable operation
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -318,6 +619,14 @@ void setup() {
           logMessage("No valid QMC5883L calibration in NVM, using defaults.");
       }
       
+      // Load altitude correction if it exists (relevant even if QMC fails)
+      preferences.begin(PREF_NAMESPACE, true); // Re-open read-only
+      altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0); // Load correction, default 0
+      preferences.end();
+
+      if (altitudeCorrection != 0) {
+          logMessage("Loaded Altitude Correction: " + String(altitudeCorrection) + "m");
+      }
       if (compassInverted) {
           logMessage("Compass display is inverted.");
       }
@@ -329,20 +638,50 @@ void setup() {
           logMessage("HMC5883L initialized successfully.");
           activeCompass = &hmcCompass;
           
-          // Load HMC declination from preferences
+          // Load HMC declination, calibration and inversion from preferences
           preferences.begin(PREF_NAMESPACE, true); // Open NVM in read-only mode
           currentDeclination = preferences.getFloat(KEY_DECLINATION, 0.0f);
           compassInverted = preferences.getBool(KEY_COMPASS_INVERTED, false);
-          preferences.end();
+          altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0); // Load correction, default 0
+          bool hmcCalValid = preferences.getBool(KEY_HMC_CAL_VALID, false);
           
           // Set declination from saved value
           hmcCompass.setDeclination(currentDeclination);
           
+          // Load calibration if available
+          if (hmcCalValid) {
+              float x_offset = preferences.getFloat(KEY_HMC_X_OFFSET, 0.0f);
+              float y_offset = preferences.getFloat(KEY_HMC_Y_OFFSET, 0.0f);
+              float z_offset = preferences.getFloat(KEY_HMC_Z_OFFSET, 0.0f);
+              float x_scale = preferences.getFloat(KEY_HMC_X_SCALE, 1.0f);
+              float y_scale = preferences.getFloat(KEY_HMC_Y_SCALE, 1.0f);
+              float z_scale = preferences.getFloat(KEY_HMC_Z_SCALE, 1.0f);
+              
+              hmcCompass.setCalibrationOffsets(x_offset, y_offset, z_offset);
+              hmcCompass.setCalibrationScales(x_scale, y_scale, z_scale);
+              logMessage("Loaded HMC5883L compass calibration from NVM.");
+          }
+          
+          preferences.end();
+          
           logMessage("Using HMC5883L with declination: " + String(currentDeclination * 180.0 / PI, 2) + " degrees.");
+          if (altitudeCorrection != 0) {
+              logMessage("Loaded Altitude Correction: " + String(altitudeCorrection) + "m");
+          }
+          if (compassInverted) {
+              logMessage("Compass display is inverted.");
+          }
       }
       else {
           logMessage("*** WARNING: Both compass initialization attempts failed. ***");
           activeCompass = nullptr;
+          // Still load altitude correction even if no compass works
+           preferences.begin(PREF_NAMESPACE, true); // Re-open read-only
+           altitudeCorrection = preferences.getInt(KEY_ALT_CORRECTION, 0); // Load correction, default 0
+           preferences.end();
+            if (altitudeCorrection != 0) {
+              logMessage("Loaded Altitude Correction: " + String(altitudeCorrection) + "m");
+          }
       }
   }
   
@@ -398,1025 +737,351 @@ void setup() {
   logMessage("GPS (BN-880 UART): RX=25, TX=21 @ " + String(gpsBaudRate));
   logMessage("Host (TTL UART): RX=33, TX=23 @ 115200");
   logMessage("Waiting for GPS data...");
+  
+  // Load interference mitigation settings
+  preferences.begin(PREF_NAMESPACE, true); // Open read-only
+  enableOutlierRejection = preferences.getBool(KEY_OUTLIER_REJECTION, true);
+  enableNoiseThreshold = preferences.getBool(KEY_NOISE_THRESHOLD, true);
+  enableGpsFusion = preferences.getBool(KEY_GPS_FUSION, true);
+  enableMagneticInterference = preferences.getBool(KEY_MAG_INTERFERENCE, true);
+  preferences.end();
+  
+  logMessage("Compass interference mitigation settings:");
+  logMessage(" - Outlier rejection: " + String(enableOutlierRejection ? "ON" : "OFF"));
+  logMessage(" - Noise threshold: " + String(enableNoiseThreshold ? "ON" : "OFF"));
+  logMessage(" - GPS fusion: " + String(enableGpsFusion ? "ON" : "OFF"));
+  logMessage(" - Magnetic interference: " + String(enableMagneticInterference ? "ON" : "OFF"));
+  
+  if (activeCompass != nullptr) {
+    // Take initial readings to stabilize compass
+    logMessage("Initializing compass readings...");
+    compassStartupTime = millis();
+    
+    // Take multiple readings to stabilize the sensor
+    for (int i = 0; i < 10; i++) {
+      activeCompass->read();
+      delay(50);
+    }
+    
+    // Read raw heading directly from compass (avoid smoothing during initial read)
+    int initialHeading = activeCompass->getAzimuth();
+    
+    // Initialize smoothed heading to actual compass heading (not 0)
+    smoothedHeading = initialHeading;
+    
+    // Log initial compass heading
+    char dirStr[4];
+    activeCompass->getDirection(dirStr, initialHeading);
+    logMessage("Initial compass heading: " + String(initialHeading) + "° (" + String(dirStr) + ")");
+    
+    // Log compass type-specific info
+    if (activeCompass == &hmcCompass) {
+      float declDegrees = currentDeclination * 180.0 / PI;
+      logMessage("HMC5883L with declination: " + String(declDegrees, 1) + "°");
+      logMessage("NOTE: HMC compass can be calibrated but requires declination setting");
+    }
+  }
 }
 
 void loop() {
-  // Update M5 hardware first
+  // Update M5 hardware state (buttons, etc.)
   M5.update();
 
-  // --- Button Handling Logic (Revised for Key Up/Hold) ---
-  bool button_pressed = M5.BtnA.wasPressed();
-  bool button_released = M5.BtnA.wasReleased();
-  bool button_held = M5.BtnA.wasHold();
+  // Normal GPS data processing
+  while (GPS.available() > 0) {
+    char c = GPS.read();
+    gps.encode(c);
+  }
 
-  // Actions differ based on current mode and calibration state
-  if (currentDisplayMode == DisplayMode::COMPASS_STATUS) {
-    // Check which compass is active for available features
-    bool qmc_active = (activeCompass == &qmcCompass);
-    bool hmc_active = (activeCompass == &hmcCompass);
+  // Apply privacy filter if GPS data was updated
+  if (gps.location.isValid()) {
+    applyPrivacyFilter();
+  }
+}
+
+// World Map Screen
+void handleShortPressWorldMap() {
+  // Short press on World Map: Cycle to next display mode
+  currentDisplayMode = DisplayMode::GPS_STATUS;
+  logMessage("Display mode changed to: GPS_STATUS");
+}
+
+void handleLongPressWorldMap() {
+  // Long press on World Map: Toggle privacy mode
+  privacyModeEnabled = !privacyModeEnabled;
+  
+  // Immediately apply privacy filter to update displayed coordinates
+  if (gps.location.isValid()) {
+    applyPrivacyFilter();
+  }
+  
+  // Clearly log that this is GPS coordinate privacy
+  if (privacyModeEnabled) {
+    logMessage("GPS PRIVACY MODE ENABLED - Coordinates will be masked");
+  } else {
+    logMessage("GPS PRIVACY MODE DISABLED - Showing actual coordinates");
+  }
+}
+
+// Altitude Correction Mode
+void handleShortPressAltitudeCorrection() {
+  // Short press in altitude correction mode: Increment correction
+  altitudeCorrection += 10;
+  logMessage("Altitude correction: " + String(altitudeCorrection) + "m");
+}
+
+void handleLongPressAltitudeCorrection() {
+  // Long press in altitude correction mode: Save and exit
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putInt(KEY_ALT_CORRECTION, altitudeCorrection);
+  preferences.end();
+  isSettingAltitudeCorrection = false;
+  logMessage("Altitude correction saved: " + String(altitudeCorrection) + "m");
+}
+
+// Calibration Mode Selection
+void handleShortPressCalibrationModeSelection() {
+  // Short press in calibration mode selection: Rotate through options
+  calibrationModeIndex = (calibrationModeIndex + 1) % NUM_CALIBRATION_MODES;
+  logMessage("Calibration mode: " + String(CALIBRATION_MODE_NAMES[calibrationModeIndex]));
+}
+
+void handleLongPressCalibrationModeSelection() {
+  // Long press in calibration mode selection: Select current mode
+  logMessage("DEBUG: Starting calibration selection handler...");
+  
+  if (calibrationModeIndex == NUM_CALIBRATION_MODES - 1) {
+    // Selected "Cancel" option
+    isSelectingCalibrationMode = false;
+    logMessage("Calibration cancelled");
+  } else {
+    // Selected a valid calibration mode
+    calibrationPoints = CALIBRATION_MODE_POINTS[calibrationModeIndex];
+    isSelectingCalibrationMode = false;
+    isCalibrating = true;
+    calibrationStep = 1;
+    logMessage("DEBUG: Set isCalibrating=" + String(isCalibrating) + ", calibrationPoints=" + String(calibrationPoints) + ", step=" + String(calibrationStep));
+    logMessage("Starting " + String(calibrationPoints) + "-point calibration...");
+  }
+}
+
+// Calibrating Compass
+void handleShortPressCalibrating() {
+  // Short press while calibrating: Capture calibration point
+  if (calibrationStep > 0 && calibrationStep <= calibrationPoints) {
+    logMessage("Capturing calibration point " + String(calibrationStep) + " of " + String(calibrationPoints));
     
-    if (isSelectingCalibrationMode) {
-      // --- Selecting calibration mode ---
-      if (button_pressed) {
-        // Rotate through options
-        calibrationModeIndex = (calibrationModeIndex + 1) % NUM_CALIBRATION_MODES;
-        delay(50); // Debounce
-      }
-      else if (button_held) {
-        // Select current option
-        if (calibrationModeIndex == NUM_CALIBRATION_MODES - 1) {
-          // Selected Cancel
-          logMessage("Calibration cancelled.");
-          isSelectingCalibrationMode = false;
-        } else {
-          // Selected a calibration mode
-          calibrationPoints = CALIBRATION_MODE_POINTS[calibrationModeIndex];
-          logMessage("Starting " + String(calibrationPoints) + "-point calibration...");
-          isSelectingCalibrationMode = false;
-          isCalibrating = true;
-          calibrationStep = 1;
-        }
-      }
-    }
-    else if (isCalibrating) {
-      // --- Currently Calibrating (QMC only) ---
-      if (!qmc_active) {
-        // Cancel calibration if not using QMC
-        logMessage("Calibration only available for QMC5883L library. Cancelling.");
-        isCalibrating = false;
-        calibrationStep = 0;
-      }
-      else if (button_pressed && calibrationStep > 0 && calibrationStep <= calibrationPoints) {
-        // Capture Calibration Point on Press
-        logMessage("Capturing calibration point " + String(calibrationStep) + " of " + String(calibrationPoints));
-        activeCompass->read();
-        calX[calibrationStep - 1] = activeCompass->getX();
-        calY[calibrationStep - 1] = activeCompass->getY();
-        calibrationStep++;
-        delay(50); // Small delay to help debounce/prevent double step
+    if (activeCompass) {
+      activeCompass->read();
+      calX[calibrationStep - 1] = activeCompass->getX();
+      calY[calibrationStep - 1] = activeCompass->getY();
+      calibrationStep++;
 
-        if (calibrationStep > calibrationPoints) {
-          logMessage("Calculating " + String(calibrationPoints) + "-point calibration...");
-          if (qmcCompass.calculateCalibration(calX, calY)) {
-            logMessage("Calibration calculated and applied successfully.");
+      // If last point captured, calculate and apply calibration
+      if (calibrationStep > calibrationPoints) {
+        logMessage("Calculating " + String(calibrationPoints) + "-point calibration...");
+        
+        if (activeCompass->calculateCalibration(calX, calY)) {
+          logMessage("Calibration calculated and applied successfully.");
+          
+          // Save to NVM based on compass type
+          preferences.begin(PREF_NAMESPACE, false);
+          
+          if (activeCompass == &qmcCompass) {
+            // For QMC compass
+            // Set calibration as valid
+            preferences.putBool(KEY_CAL_VALID, true);
             
-            // Save to NVM
-            preferences.begin(PREF_NAMESPACE, false); // Open in write mode
+            // Since we don't have direct access to the internal calibration values,
+            // we can calculate them from the min/max of our collected points
+            float x_min = calX[0], x_max = calX[0];
+            float y_min = calY[0], y_max = calY[0];
             
-            // Get current values from the sensor to store
-            float x_offset, y_offset, z_offset;
-            float x_scale, y_scale, z_scale;
+            for (int i = 1; i < calibrationPoints; i++) {
+              if (calX[i] < x_min) x_min = calX[i];
+              if (calX[i] > x_max) x_max = calX[i];
+              if (calY[i] < y_min) y_min = calY[i];
+              if (calY[i] > y_max) y_max = calY[i];
+            }
             
-            // For now, we'll use placeholder values
-            // In a real implementation, you'd have getters for these values
-            x_offset = 0; y_offset = 0; z_offset = 0;
-            x_scale = 1; y_scale = 1; z_scale = 1;
+            float x_offset = (x_max + x_min) / 2.0f;
+            float y_offset = (y_max + y_min) / 2.0f;
+            float z_offset = 0.0f; // We don't use Z for calibration
             
+            float x_delta = (x_max - x_min) / 2.0f;
+            float y_delta = (y_max - y_min) / 2.0f;
+            float avg_delta = (x_delta + y_delta) / 2.0f;
+            
+            float x_scale = (x_delta > 0) ? avg_delta / x_delta : 1.0f;
+            float y_scale = (y_delta > 0) ? avg_delta / y_delta : 1.0f;
+            float z_scale = 1.0f;
+            
+            // Save calculated values
             preferences.putFloat(KEY_X_OFFSET, x_offset);
             preferences.putFloat(KEY_Y_OFFSET, y_offset);
             preferences.putFloat(KEY_Z_OFFSET, z_offset);
             preferences.putFloat(KEY_X_SCALE, x_scale);
             preferences.putFloat(KEY_Y_SCALE, y_scale);
             preferences.putFloat(KEY_Z_SCALE, z_scale);
-            preferences.putBool(KEY_CAL_VALID, true);
-            preferences.end();
             
-            logMessage("Calibration saved to NVM.");
-          } else {
-            logMessage("Calibration calculation failed. Try again.");
+            // Also save interference mitigation settings
+            preferences.putBool(KEY_OUTLIER_REJECTION, enableOutlierRejection);
+            preferences.putBool(KEY_NOISE_THRESHOLD, enableNoiseThreshold);
+            preferences.putBool(KEY_GPS_FUSION, enableGpsFusion);
+            preferences.putBool(KEY_MAG_INTERFERENCE, enableMagneticInterference);
+            
+            logMessage("QMC5883L calibration and interference settings saved.");
+          } 
+          else if (activeCompass == &hmcCompass) {
+            // For HMC compass
+            // Same calculations as for QMC to ensure consistency
+            preferences.putBool(KEY_HMC_CAL_VALID, true);
+            
+            float x_min = calX[0], x_max = calX[0];
+            float y_min = calY[0], y_max = calY[0];
+            
+            for (int i = 1; i < calibrationPoints; i++) {
+              if (calX[i] < x_min) x_min = calX[i];
+              if (calX[i] > x_max) x_max = calX[i];
+              if (calY[i] < y_min) y_min = calY[i];
+              if (calY[i] > y_max) y_max = calY[i];
+            }
+            
+            float x_offset = (x_max + x_min) / 2.0f;
+            float y_offset = (y_max + y_min) / 2.0f;
+            float z_offset = 0.0f;
+            
+            float x_delta = (x_max - x_min) / 2.0f;
+            float y_delta = (y_max - y_min) / 2.0f;
+            float avg_delta = (x_delta + y_delta) / 2.0f;
+            
+            float x_scale = (x_delta > 0) ? avg_delta / x_delta : 1.0f;
+            float y_scale = (y_delta > 0) ? avg_delta / y_delta : 1.0f;
+            float z_scale = 1.0f;
+            
+            // Save calculated values
+            preferences.putFloat(KEY_HMC_X_OFFSET, x_offset);
+            preferences.putFloat(KEY_HMC_Y_OFFSET, y_offset);
+            preferences.putFloat(KEY_HMC_Z_OFFSET, z_offset);
+            preferences.putFloat(KEY_HMC_X_SCALE, x_scale);
+            preferences.putFloat(KEY_HMC_Y_SCALE, y_scale);
+            preferences.putFloat(KEY_HMC_Z_SCALE, z_scale);
+            
+            // Also save interference mitigation settings (these apply to both compass types)
+            preferences.putBool(KEY_OUTLIER_REJECTION, enableOutlierRejection);
+            preferences.putBool(KEY_NOISE_THRESHOLD, enableNoiseThreshold);
+            preferences.putBool(KEY_GPS_FUSION, enableGpsFusion);
+            preferences.putBool(KEY_MAG_INTERFERENCE, enableMagneticInterference);
+            
+            logMessage("HMC5883L calibration and interference settings saved.");
           }
+          preferences.end();
           
-          // Move to inversion setting
+          // Exit calibration mode
           isCalibrating = false;
           calibrationStep = 0;
+          
+          // Move to inversion setting
           isSettingInversion = true;
+          
+          // Log the applied interference settings
+          logMessage("Applied interference settings: ");
+          logMessage(" - Outlier rejection: " + String(enableOutlierRejection ? "ON" : "OFF"));
+          logMessage(" - Noise threshold: " + String(enableNoiseThreshold ? "ON" : "OFF"));
+          logMessage(" - GPS fusion: " + String(enableGpsFusion ? "ON" : "OFF"));
+          logMessage(" - Magnetic interference: " + String(enableMagneticInterference ? "ON" : "OFF"));
+        } else {
+          logMessage("Calibration calculation failed. Try again.");
+          isCalibrating = false;
+          calibrationStep = 0;
         }
-      } else if (button_held) {
-        // Cancel Calibration with long press
-        logMessage("Calibration cancelled.");
-        isCalibrating = false;
-        calibrationStep = 0;
-      }
-      // Ignore release events during calibration steps
-    } 
-    else if (isSettingDeclination) {
-      // --- Currently Setting Declination (HMC only) ---
-      if (!hmc_active) {
-        // Cancel declination setting if not using HMC
-        logMessage("Declination setting only available for HMC5883L. Cancelling.");
-        isSettingDeclination = false;
-      }
-      else if (button_pressed) {
-        // Set the current direction as true north
-        activeCompass->read();
-        int magneticHeading = activeCompass->getAzimuth();
-        // Declination is the angle between magnetic north (0) and the current direction (which user is pointing to true north)
-        currentDeclination = radians(magneticHeading); // If compass reads 0-359, true north is at "magneticHeading"
-        
-        // Apply declination immediately
-        hmcCompass.setDeclination(currentDeclination);
-        
-        // Save to NVM
-        preferences.begin(PREF_NAMESPACE, false); // Open in write mode
-        preferences.putFloat(KEY_DECLINATION, currentDeclination);
-        preferences.end();
-        
-        float declDegrees = currentDeclination * 180.0 / PI;
-        logMessage("Declination set to: " + String(declDegrees, 1) + " degrees");
-        
-        // Move to inversion setting
-        isSettingDeclination = false;
-        isSettingInversion = true;
-      }
-      else if (button_held) {
-        // Cancel declination setting
-        logMessage("Declination setting cancelled.");
-        isSettingDeclination = false;
       }
     }
-    else if (isSettingInversion) {
-      // --- Compass Inversion Setting UI ---
-      if (button_pressed) {
-        // Short press sets normal (non-inverted) mode
-        compassInverted = false;
-        
-        // Save to NVM
-        preferences.begin(PREF_NAMESPACE, false); // Open in write mode
-        preferences.putBool(KEY_COMPASS_INVERTED, false);
-        preferences.end();
-        
-        logMessage("Compass display set to normal (non-inverted) mode.");
-        isSettingInversion = false;
-      }
-      else if (button_held) {
-        // Long press sets inverted mode
-        compassInverted = true;
-        
-        // Save to NVM
-        preferences.begin(PREF_NAMESPACE, false); // Open in write mode
-        preferences.putBool(KEY_COMPASS_INVERTED, true);
-        preferences.end();
-        
-        logMessage("Compass display set to inverted mode.");
-        isSettingInversion = false;
-      }
-    }
-    else if (button_held) {
-      // Long press on status screen starts calibration or declination setting
-      if (activeCompass == &qmcCompass) {
-        // Long press shows calibration mode selection for QMC
-        logMessage("Select calibration mode...");
-        isSelectingCalibrationMode = true;
-        calibrationModeIndex = 1; // Default to 8-point
-      } 
-      else if (activeCompass == &hmcCompass) {
-        // Long press starts declination setting for HMC
-        logMessage("Starting declination setting (HMC5883L)...");
-        isSettingDeclination = true;
-      }
-    }
-    else if (button_released) {
-      // Short press/release cycles to next mode
-      currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
-    }
   }
-  else if (currentDisplayMode == DisplayMode::GRAPHIC_COMPASS) {
-    // On Graphic Compass Screen, just handle mode cycling
-    if (button_released) { // Cycle modes on RELEASE
-      currentDisplayMode = DisplayMode::WORLD_MAP; // Now cycles to world map instead of GPS status
-    }
-    // Remove long press calibration options from compass screen
-  }
-  else if (currentDisplayMode == DisplayMode::WORLD_MAP) {
-    // On World Map Screen, just handle mode cycling
-    if (button_released) { // Cycle modes on RELEASE
-      currentDisplayMode = DisplayMode::GPS_STATUS;
-    }
-  }
-  else if (currentDisplayMode == DisplayMode::GPS_STATUS) {
-    // On GPS Status Screen, just handle mode cycling
-    if (button_released) { // Cycle modes on RELEASE
-      currentDisplayMode = DisplayMode::COMPASS_STATUS;
-    }
-  }
-  else {
-    // --- Not on Graphic Compass or GPS Status Screen ---
-    if (button_released) { // Cycle modes on RELEASE
-      currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
-    }
-  }
-
-  // Read GPS data and forward NMEA sentences using non-blocking approach
-  unsigned long startTime = millis();
-  while (GPS.available() > 0 && (millis() - startTime) < 20) {
-    char c = GPS.read();
-    gps.encode(c);
-    Host.write(c);  // Forward NMEA data to UART2 (not logged to buffer)
-  }
-  
-  // --- Read Compass Data ---
-  int currentHeading = 0;
-  String rawCompassData = "Compass: Not available";
-  
-  if (activeCompass != nullptr) {
-    activeCompass->read(); // Read new data
-    currentHeading = activeCompass->getAzimuth();
-    
-    // Get raw data for display
-    rawCompassData = String(activeCompass->getSensorName()) + ":\n";
-    rawCompassData += "X=" + String(activeCompass->getX()) + "\n";
-    rawCompassData += "Y=" + String(activeCompass->getY()) + "\n";
-    rawCompassData += "Z=" + String(activeCompass->getZ());
-    
-    // Add declination info for HMC5883L
-    if (activeCompass == &hmcCompass) {
-      rawCompassData += "\nDecl=" + String(currentDeclination * 180.0 / PI, 1) + " deg";
-    }
-  }
-  
-  latest_compass_raw = rawCompassData;
-  // --- End Read Compass Data ---
-
-  // Update display based on GPS state OR show log buffer (approx once per second)
-  static unsigned long lastDisplayUpdate = 0;
-  if (millis() - lastDisplayUpdate >= 1000) {  
-    lastDisplayUpdate = millis();
-
-    // Decide which screen to show based on currentDisplayMode
-    switch (currentDisplayMode) {
-      case DisplayMode::GPS_STATUS:
-        // Show the GPS status screen on the OLED
-        displayLogOnOLED();
-        break; // End GPS_STATUS mode
-
-      case DisplayMode::COMPASS_STATUS:
-        // Show the compass status screen on the OLED
-        displayCompassLogOnOLED();
-        break; // End COMPASS_STATUS mode
-
-      case DisplayMode::GRAPHIC_COMPASS:
-        // Show the graphic compass screen
-        displayGraphicCompass();
-        break; // End GRAPHIC_COMPASS mode
-        
-      case DisplayMode::WORLD_MAP:
-        // Show the world map with current position
-        displayWorldMap();
-        break; // End WORLD_MAP mode
-    } // end switch (currentDisplayMode)
-  } // end timed display update
 }
 
-void updateDisplay(float lat, float lng, float alt, int heading) {
-  if (!display_initialized) return;
-  
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("GPS Data:");
-  display.println("-------------");
-  
-  // Format and display coordinates
-  display.print("Lat: "); display.println(lat, 6);
-  display.print("Lng: "); display.println(lng, 6);
-  display.print("Alt: "); display.println(alt);
-  
-  // --- Compass Direction and Azimuth --- 
-  char dirArray[4] = {' ', ' ', ' ', '\0'}; // Array to hold direction text (e.g., NNE)
-  
-  if (activeCompass != nullptr) {
-    int displayHeading = heading;
-    // Apply inversion if compass is inverted
-    if (compassInverted) {
-      displayHeading = (heading + 180) % 360;
-    }
-    
-    activeCompass->getDirection(dirArray, displayHeading);
-    
-    display.setCursor(0, 40); // Position for Direction Text
-    display.print(dirArray);
-    
-    display.setCursor(0, 48); // Position for Azimuth value
-    display.print("Az ");
-    display.println(displayHeading);
-    
-    // Show declination if using HMC5883L
-    if (activeCompass == &hmcCompass) {
-      float declDegrees = currentDeclination * 180.0 / PI;
-      display.setCursor(50, 40);
-      display.print("Decl:");
-      display.print(declDegrees, 1);
-      display.print("\xB0"); // Degree symbol
-    }
-  } else {
-    display.setCursor(0, 40);
-    display.print("No compass");
-    display.setCursor(0, 48);
-    display.print("Az: ---");
-  }
-  // --- End Compass Display ---
-  
-  // Display satellite count (adjust Y position)
-  display.setCursor(0, 56); // Moved down slightly
-  display.print("Sats: ");
-  display.println(gps.satellites.value());
-  
-  // --- Lat/Lon Data moved to bottom of screen ---
-  if (gps.location.isValid()) {
-    // Format coordinates to prevent overflow
-    float lat = gps.location.lat();
-    float lng = gps.location.lng();
-    
-    // Display single label above values
-    display.setCursor(0, SCREEN_HEIGHT - 24);
-    display.println("Lat/Lng:");
-    
-    // Display lat value below the label
-    display.setCursor(0, SCREEN_HEIGHT - 16);
-    display.println(String(lat, 5));
-    
-    // Display lng label aligned to right edge
-    String lngLabel = "Lng:";
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(lngLabel, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 16);
-    display.println(lngLabel);
-    
-    // Display lng value below its label, right aligned
-    String lngValue = String(lng, 5);
-    display.getTextBounds(lngValue, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
-    display.print(lngValue);
-  } else {
-    display.setCursor(0, SCREEN_HEIGHT - 24);
-    display.println("Lat/Lng:");
-    display.setCursor(0, SCREEN_HEIGHT - 16);
-    display.println("No Fix");
-    
-    // Right align Lng: label for No Fix case
-    String lngLabel = "Lng:";
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(lngLabel, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 16);
-    display.println(lngLabel);
-    
-    // Right align No Fix message
-    String noFix = "No Fix";
-    display.getTextBounds(noFix, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
-    display.println(noFix);
-  }
-  
-  // Display inversion status indicator if inverted
-  if (compassInverted) {
-    display.setCursor(90, SCREEN_HEIGHT - 8);
-    display.print("[Inv]");
-  }
-
-  display.display();
+void handleLongPressCalibrating() {
+  // Long press while calibrating: Cancel calibration
+  isCalibrating = false;
+  calibrationStep = 0;
+  logMessage("Calibration cancelled");
 }
 
-// Function to display the GPS STATUS on the OLED
-void displayLogOnOLED() {
-  if (!display_initialized) return;
-
-  display.clearDisplay(); // Clear the entire screen first
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  // Center the title
-  String title = "--- GPS Status ---";
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 0);
-  display.println(title);
-
-  // Display GPS data format with dynamic sentence types
-  String gpsProtocol = "";
-  if (gps.charsProcessed() > 0) {
-    // Check which NMEA sentence types have been received
-    if (gps.location.isUpdated()) gpsProtocol += "GGA ";
-    if (gps.date.isUpdated() || gps.time.isUpdated()) gpsProtocol += "RMC ";
-    if (gps.course.isUpdated()) gpsProtocol += "VTG ";
-    if (gps.satellites.isUpdated()) gpsProtocol += "GSV ";
-    if (gpsProtocol.length() == 0) gpsProtocol = "NMEA";
+// Setting Declination
+void handleShortPressDeclination() {
+  // Short press in declination setting: Set declination
+  if (activeCompass == &hmcCompass) {
+    activeCompass->read();
+    int magneticHeading = activeCompass->getAzimuth();
     
-    gpsProtocol += String(gpsBaudRate);
-  } else {
-    gpsProtocol = "No GPS data";
-  }
+    // Convert heading to the -180 to +180 format for declination
+    float declination = magneticHeading;
+    if (declination > 180) declination -= 360;
+    
+    // Convert to radians
+    currentDeclination = radians(declination);
   
-  display.setCursor(0, 8);
-  display.println(gpsProtocol);
-  
-  // Display Lat, Lng, and Sat on separate lines
-  if (gps.location.isValid()) {
-    float lat = gps.location.lat();
-    float lng = gps.location.lng();
+    // Apply declination immediately
+    hmcCompass.setDeclination(currentDeclination);
     
-    // Lat on its own line
-    display.setCursor(0, 16);
-    display.print("Lat ");
-    display.println(lat, 5);
+    // Save to NVM
+    preferences.begin(PREF_NAMESPACE, false);
+    preferences.putFloat(KEY_DECLINATION, currentDeclination);
+    preferences.end();
     
-    // Lng on its own line
-    display.setCursor(0, 24);
-    display.print("Lng ");
-    display.println(lng, 5);
-  } else {
-    display.setCursor(0, 16);
-    display.println("Lat No Fix");
-    display.setCursor(0, 24);
-    display.println("Lng No Fix");
+    float declDegrees = currentDeclination * 180.0 / PI;
+    logMessage("Declination set to: " + String(declDegrees, 1) + " degrees");
+    logMessage("True north should now be at compass heading: 0°");
+    
+    // Make note about calibration and declination working together
+    logMessage("HMC5883L now has both calibration + declination applied");
+    logMessage("This gives best accuracy: Calibration fixes distortion, declination aligns to true north");
+    
+    // Exit declination setting
+    isSettingDeclination = false;
+    
+    // Move to inversion setting
+    isSettingInversion = true;
   }
-  
-  // Display satellite count
-  display.setCursor(0, 32);
-  display.print("Sat ");
-  display.println(gps.satellites.value());
-  
-  // Add NMEA stats in a simple format
-  display.setCursor(0, 40);
-  display.print("NMEA: OK=");
-  display.print(gps.passedChecksum());
-  display.print(" Err=");
-  display.println(gps.failedChecksum());
-
-  // Display altitude with correction if valid
-  if (gps.altitude.isValid()) {
-    float correctedAlt = gps.altitude.meters() + altitudeCorrection;
-    display.setCursor(64, 32);
-    display.print("Alt ");
-    display.print(correctedAlt, 0);
-    display.println("m");
-  }
-
-  // Display course and speed if valid
-  if (gps.course.isValid() && gps.speed.isValid()) {
-    display.setCursor(0, 48);
-    display.print("Course: ");
-    display.print(gps.course.deg());
-    display.println("°");
-    
-    display.setCursor(0, 56);
-    display.print("Speed: ");
-    
-    // Check if GPS data quality is good enough for reliable speed
-    bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
-    
-    // Apply minimum threshold for speed to avoid erroneous readings
-    float speedKmph = gps.speed.kmph();
-    if (!reliableSpeed || speedKmph < 3.0) { // Below 3 km/h is likely noise
-      speedKmph = 0;
-    }
-    
-    display.print(speedKmph, 1);
-    display.println(" km/h");
-  }
-
-  display.display();
 }
 
-// Function to display COMPASS STATUS on the OLED
-void displayCompassLogOnOLED() {
-  if (!display_initialized) return;
-
-  display.clearDisplay(); // Clear the entire screen first
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  // Handle special calibration/declination states
-  if (isSelectingCalibrationMode) {
-    // --- Calibration Mode Selection UI ---
-    display.setCursor(0, 0);
-    display.println("Select Cal Mode:");
-    display.println("---------------");
-    
-    // Display all modes, highlight the current one
-    for (int i = 0; i < NUM_CALIBRATION_MODES; i++) {
-      if (i == calibrationModeIndex) {
-        display.print("> "); // Indicate current selection
-      } else {
-        display.print("  ");
-      }
-      display.println(CALIBRATION_MODE_NAMES[i]);
-    }
-    
-    display.setCursor(0, SCREEN_HEIGHT - 16);
-    display.println("Click: Next Option");
-    display.println("Hold: Select Option");
-  }
-  else if (isCalibrating && activeCompass == &qmcCompass) { 
-    // --- Calibration Mode UI for QMC --- 
-    display.setCursor(0, 0);
-    display.println("-- Calibrating --");
-    display.setCursor(0, 10);
-    display.print("Mode: ");
-    display.print(calibrationPoints);
-    display.println("-point");
-    
-    display.setCursor(0, 26);
-    String directions = "";
-    
-    // Get appropriate direction based on calibration step and mode
-    if (calibrationPoints == 4) {
-      // 4-point calibration: N, E, S, W
-      switch (calibrationStep) {
-        case 1: directions = "Point NORTH, Click"; break;
-        case 2: directions = "Point EAST, Click"; break;
-        case 3: directions = "Point SOUTH, Click"; break;
-        case 4: directions = "Point WEST, Click"; break;
-      }
-    } 
-    else if (calibrationPoints == 8) {
-      // 8-point calibration: N, S, E, W, NE, SE, SW, NW
-      switch (calibrationStep) {
-        case 1: directions = "Point NORTH, Click"; break;
-        case 2: directions = "Point SOUTH, Click"; break;
-        case 3: directions = "Point EAST, Click"; break;
-        case 4: directions = "Point WEST, Click"; break;
-        case 5: directions = "Point NE, Click"; break;
-        case 6: directions = "Point SE, Click"; break;
-        case 7: directions = "Point SW, Click"; break;
-        case 8: directions = "Point NW, Click"; break;
-      }
-    } 
-    else { // 16-point
-      // 16-point: Full circle in 22.5° increments
-      directions = "Point to " + String(calibrationStep * 22.5) + " deg";
-    }
-    
-    display.println(directions);
-    
-    // Progress indicator
-    display.setCursor(0, 46);
-    display.print("Progress: ");
-    display.print(calibrationStep - 1);
-    display.print("/");
-    display.println(calibrationPoints);
-    
-    display.setCursor(0, 56);
-    display.println("(Hold Btn to Cancel)");
-  } 
-  else if (isSettingDeclination && activeCompass == &hmcCompass) {
-    // --- Declination Setting UI for HMC ---
-    display.setCursor(0, 0);
-    display.println("- Set Declination -");
-    
-    // Instructions for pointing to true north
-    display.setCursor(0, 16);
-    display.println("Point device to TRUE");
-    display.setCursor(0, 26);
-    display.println("NORTH, then click");
-    
-    // Current compass reading
-    display.setCursor(0, 40);
-    display.print("Current: ");
-    display.print(activeCompass->getAzimuth());
-    display.println(" deg");
-    
-    // Controls
-    display.setCursor(0, 56);
-    display.println("Hold: Cancel");
-  }
-  else if (isSettingInversion) {
-    // --- Compass Inversion Setting UI ---
-    display.setCursor(0, 0);
-    display.println("Invert Compass?");
-    display.println("---------------");
-    
-    // Display current compass - make it smaller and centered
-    int centerX = SCREEN_WIDTH / 2;
-    int centerY = 30; // Position it more toward the top
-    int radius = 15;  // Smaller radius to avoid overlap
-    
-    if (activeCompass != nullptr) {
-      int heading = activeCompass->getAzimuth();
-      
-      // Apply current inversion setting for preview
-      if (compassInverted) {
-        heading = (heading + 180) % 360;
-      }
-      
-      // Draw the compass
-      float angleRad = radians(270 - heading);
-      int endX = centerX + radius * cos(angleRad);
-      int endY = centerY + radius * sin(angleRad);
-      
-      display.drawCircle(centerX, centerY, radius, SSD1306_WHITE);
-      display.drawLine(centerX, centerY, endX, endY, SSD1306_WHITE);
-      display.fillCircle(centerX, centerY, 2, SSD1306_WHITE);
-      
-      // Draw cardinal points - smaller and closer to the circle
-      display.setCursor(centerX - 2, centerY - radius - 6);
-      display.print("N");
-      display.setCursor(centerX - 2, centerY + radius);
-      display.print("S");
-      display.setCursor(centerX + radius, centerY - 2);
-      display.print("E");
-      display.setCursor(centerX - radius - 5, centerY - 2);
-      display.print("W");
-      
-      // Current heading - moved to the side
-      display.setCursor(68, 14);
-      display.print("Hdg:");
-      display.print(heading);
-      display.print("\xB0"); // Degree symbol
-    }
-    
-    // Instructions - clear separation at bottom
-    display.setCursor(0, SCREEN_HEIGHT - 18);
-    display.println("Click: Normal");
-    display.setCursor(70, SCREEN_HEIGHT - 18);
-    display.println("Hold: Invert");
-    
-    // Show inversion status
-    display.setCursor(0, SCREEN_HEIGHT - 8);
-    display.print("Current: ");
-    display.print(compassInverted ? "Inverted" : "Normal");
-  }
-  else {
-    // Normal Compass Status Screen
-    // Center the title
-    String title = "-- Compass Status --";
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor((SCREEN_WIDTH - w) / 2, 0);
-    display.println(title);
-    
-    // Print Compass Status
-    if (activeCompass != nullptr) {
-      // Display compass type and heading
-      display.setCursor(0, 10);
-      display.print(activeCompass->getSensorName());
-      
-      // Show declination if using HMC5883L
-      if (activeCompass == &hmcCompass) {
-        float declDegrees = currentDeclination * 180.0 / PI;
-        display.print(" Decl:");
-        display.print(declDegrees, 1);
-        display.print("\xB0"); // Degree symbol
-      }
-      
-      // Display heading
-      activeCompass->read();
-      int displayHeading = activeCompass->getAzimuth();
-      // Apply inversion if compass is inverted
-      if (compassInverted) {
-        displayHeading = (displayHeading + 180) % 360;
-      }
-      
-      display.setCursor(0, 20);
-      display.print("Az ");
-      display.print(displayHeading);
-      display.print("\xB0 "); // Degree symbol
-      
-      // Get cardinal direction
-      char dirArray[4] = {' ', ' ', ' ', '\0'};
-      activeCompass->getDirection(dirArray, displayHeading);
-      display.print(dirArray);
-      
-      // Print raw sensor data
-      display.setCursor(0, 30);
-      display.print("X: ");
-      display.println(activeCompass->getX());
-      display.setCursor(0, 38);
-      display.print("Y: ");
-      display.println(activeCompass->getY());
-      display.setCursor(0, 46);
-      display.print("Z: ");
-      display.println(activeCompass->getZ());
-      
-      if (compassInverted) {
-        display.setCursor(0, 56);
-        display.print("[Inverted]");
-      }
-    } else {
-      display.setCursor(0, 20);
-      display.println("No compass detected");
-    }
-    
-    // Add calibration prompt in bottom right
-    if (activeCompass != nullptr) {
-      String calibPrompt = "";
-      if (activeCompass == &qmcCompass) {
-        calibPrompt = "Cal: Hold";
-      } else if (activeCompass == &hmcCompass) {
-        calibPrompt = "Decl: Hold";
-      }
-      
-      // Calculate position to right-align text
-      display.getTextBounds(calibPrompt, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
-      display.print(calibPrompt);
-    }
-  }
-
-  display.display();
+void handleLongPressDeclination() {
+  // Long press in declination setting: Cancel
+  isSettingDeclination = false;
+  logMessage("Declination setting cancelled");
 }
 
-// Function to display graphical compass and Lat/Lon
-void displayGraphicCompass() {
-  if (!display_initialized) return;
-
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  // --- Normal Graphic Compass Mode UI --- 
-  // Compass Graphic - centered on screen
-  int centerX = SCREEN_WIDTH / 2;
-  int centerY = SCREEN_HEIGHT / 2; // Fully centered vertically
-  int radius = 22; // Slightly larger radius
-  int heading = 0;
+// Setting Inversion
+void handleShortPressInversion() {
+  // Short press in inversion setting: Set normal mode
+  compassInverted = false;
   
-  if (activeCompass != nullptr) {
-    heading = activeCompass->getAzimuth();
-    
-    // Apply compass inversion if needed
-    if (compassInverted) {
-      heading = (heading + 180) % 360;
-    }
-    
-    // Fix the compass display - invert the angle
-    // North should be up (270 degrees in screen coordinates)
-    float angleRad = radians(270 - heading); // This makes needle point to correct direction
-    
-    // Draw the compass circle
-    display.drawCircle(centerX, centerY, radius, SSD1306_WHITE);
-    
-    // Draw the compass needle (pointy end indicates North)
-    int endX = centerX + radius * cos(angleRad);
-    int endY = centerY + radius * sin(angleRad);
-    display.drawLine(centerX, centerY, endX, endY, SSD1306_WHITE);
-    
-    // Add arrowhead to make direction clearer
-    float arrowAngle1 = angleRad + radians(150);
-    float arrowAngle2 = angleRad + radians(210);
-    int arrowLength = 6;
-    int arrow1X = endX + arrowLength * cos(arrowAngle1);
-    int arrow1Y = endY + arrowLength * sin(arrowAngle1);
-    int arrow2X = endX + arrowLength * cos(arrowAngle2);
-    int arrow2Y = endY + arrowLength * sin(arrowAngle2);
-    display.drawLine(endX, endY, arrow1X, arrow1Y, SSD1306_WHITE);
-    display.drawLine(endX, endY, arrow2X, arrow2Y, SSD1306_WHITE);
-    
-    // Draw center dot
-    display.fillCircle(centerX, centerY, 2, SSD1306_WHITE);
-    
-    // Draw compass rose labels with improved positioning
-    display.setCursor(centerX - 2, centerY - radius - 7); 
-    display.print("N"); 
-    display.setCursor(centerX - 2, centerY + radius + 1);
-    display.print("S");
-    display.setCursor(centerX + radius + 2, centerY - 3);
-    display.print("E");
-    display.setCursor(centerX - radius - 7, centerY - 3);
-    display.print("W");
-  } else {
-    // Draw an error indicator
-    display.setCursor(centerX - 8, centerY - 4); 
-    display.print("ERR");
-  }
-
-  // --- Show azimuth as a number at the top --- 
-  if (activeCompass != nullptr) {
-    display.setCursor(0, 0);
-    display.print("Az "); 
-    display.print(heading);
-    
-    // Remove cardinal direction display from top right
-  } else {
-    display.setCursor(0, 0);
-    display.print("Az ---");
-  }
+  // Save to NVM
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putBool(KEY_COMPASS_INVERTED, false);
+  preferences.end();
   
-  // --- Display altitude in top right if available ---
-  if (gps.altitude.isValid()) {
-    // Check if GPS data quality is good enough for reliable altitude
-    bool reliableAlt = gps.satellites.value() >= 5 && gps.hdop.isValid() && gps.hdop.hdop() < 2.5;
-    
-    // Get altitude and apply correction
-    float correctedAlt = gps.altitude.meters() + altitudeCorrection;
-    
-    // Only display if reasonably reliable
-    if (reliableAlt) {
-      String altStr = "Alt " + String(correctedAlt, 0) + "m";
-      int16_t x1, y1;
-      uint16_t w, h;
-      display.getTextBounds(altStr, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor(SCREEN_WIDTH - w, 0);
-      display.print(altStr);
-    }
-  }
+  logMessage("Compass display set to normal (non-inverted) mode");
+  isSettingInversion = false;
   
-  // --- Display speed on the right side of compass if > 0 ---
-  if (gps.speed.isValid()) {
-    // Check if GPS data quality is good enough for reliable speed
-    bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
-    
-    // Apply minimum threshold for speed to avoid erroneous readings
-    float speedKmph = gps.speed.kmph();
-    if (!reliableSpeed || speedKmph < 3.0) { // Below 3 km/h is likely noise
-      speedKmph = 0;
-    }
-    
-    // Only display if speed is greater than 0
-    if (speedKmph > 0) {
-      String spdStr = "Spd " + String(speedKmph, 1) + "km/h";
-      int16_t x1, y1;
-      uint16_t w, h;
-      display.getTextBounds(spdStr, 0, 0, &x1, &y1, &w, &h);
-      // Position to the right of the compass, vertically centered
-      display.setCursor(centerX + radius + 4, centerY - h/2);
-      display.print(spdStr);
-    }
+  // If we're using HMC5883L and haven't set declination yet, allow it now
+  if (activeCompass == &hmcCompass && !isSettingDeclination) {
+    isSettingDeclination = true;
+    logMessage("Now set declination for HMC5883L...");
+    logMessage("Point to TRUE NORTH, then click the button.");
   }
-  
-  // --- Lat/Lon Data moved to bottom of screen ---
-  if (gps.location.isValid()) {
-    // Format coordinates to prevent overflow
-    float lat = gps.location.lat();
-    float lng = gps.location.lng();
-    
-    // Display lat label on left
-    display.setCursor(0, SCREEN_HEIGHT - 16);
-    display.println("Lat");
-    
-    // Display lat value below the label
-    display.setCursor(0, SCREEN_HEIGHT - 8);
-    display.print(String(lat, 5));
-    
-    // Display lng label aligned to right edge
-    String lngLabel = "Lng";
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(lngLabel, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 16);
-    display.println(lngLabel);
-    
-    // Display lng value below its label, right aligned
-    String lngValue = String(lng, 5);
-    display.getTextBounds(lngValue, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
-    display.print(lngValue);
-  } else {
-    // No Fix case
-    display.setCursor(0, SCREEN_HEIGHT - 16);
-    display.println("Lat");
-    display.setCursor(0, SCREEN_HEIGHT - 8);
-    display.println("No Fix");
-    
-    // Right align Lng label for No Fix case
-    String lngLabel = "Lng";
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(lngLabel, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 16);
-    display.println(lngLabel);
-    
-    // Right align No Fix message
-    String noFix = "No Fix";
-    display.getTextBounds(noFix, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
-    display.println(noFix);
-  }
-  
-  // Display inversion status indicator if inverted
-  if (compassInverted) {
-    display.setCursor(0, 0);
-    display.print("[Inv]");
-  }
-
-  display.display();
 }
 
-// Function to display a world map with current position
-void displayWorldMap() {
-  if (!display_initialized) return;
-
-  display.clearDisplay();
+void handleLongPressInversion() {
+  // Long press in inversion setting: Set inverted mode
+  compassInverted = true;
   
-  // Draw the world map bitmap
-  display.drawBitmap(0, 0, world_map, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  // Save to NVM
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putBool(KEY_COMPASS_INVERTED, true);
+  preferences.end();
   
-  // Check if we have a valid GPS position
-  if (gps.location.isValid()) {
-    float lat = gps.location.lat();
-    float lng = gps.location.lng();
-    
-    // Convert latitude and longitude to x,y coordinates on the 128x64 bitmap
-    // For Mercator projection:
-    // X coordinate - longitude is linear
-    int posX = (int)((lng + 180.0) / 360.0 * SCREEN_WIDTH);
-    
-    // Y coordinate - latitude uses Mercator formula
-    // Constrain latitude to avoid infinite values near poles
-    if (lat > 85.0) lat = 85.0;
-    if (lat < -85.0) lat = -85.0;
-    
-    // Mercator formula: y = ln(tan(pi/4 + lat*pi/360))
-    float latRad = lat * PI / 180.0;
-    float mercN = log(tan((PI/4) + (latRad/2)));
-    // Scale to screen height (0 at top, SCREEN_HEIGHT at bottom)
-    int posY = (int)(SCREEN_HEIGHT/2 - (mercN * SCREEN_HEIGHT / (2*PI)));
-    
-    // Make sure position is on screen
-    posX = constrain(posX, 0, SCREEN_WIDTH-1);
-    posY = constrain(posY, 0, SCREEN_HEIGHT-1);
-    
-    // Make the position blink (1/2 second on, 1/2 second off)
-    if ((millis() / 500) % 2 == 0) {
-      // Draw position marker (filled circle with outline)
-      display.fillCircle(posX, posY, 3, SSD1306_WHITE);
-      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
-    } else {
-      // Draw just the outline when in "off" cycle for better visibility
-      display.drawCircle(posX, posY, 3, SSD1306_WHITE);
-      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
-    }
-    
-    // Optionally draw a small heading indicator if we have compass data
-    if (activeCompass != nullptr) {
-      activeCompass->read();
-      int heading = activeCompass->getAzimuth();
-      
-      // Apply compass inversion if needed
-      if (compassInverted) {
-        heading = (heading + 180) % 360;
-      }
-      
-      // Draw a small line indicating heading direction
-      float radians = heading * PI / 180.0;
-      int arrowLength = 8;
-      int endX = posX + sin(radians) * arrowLength;
-      int endY = posY - cos(radians) * arrowLength;
-      
-      display.drawLine(posX, posY, endX, endY, SSD1306_WHITE);
-    }
-    
-    // Removed the coordinate display at the bottom
-  } else {
-    // No GPS fix - display a small message instead of full coordinates
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    
-    // Small indicator at the bottom for no fix
-    display.setCursor(2, SCREEN_HEIGHT - 8);
-    display.print("No Fix");
-  }
-  
-  display.display();
+  logMessage("Compass display set to inverted mode");
+  isSettingInversion = false;
 }
-
-// Helper function to scan I2C devices
-void scanI2CDevices(void) {
-  byte error, address;
-  int nDevices = 0;
-  
-  logMessage("\nScanning I2C bus..."); // Use logMessage
-  
-  for(address = 1; address < 127; address++) {
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
-    
-    if (error == 0) {
-      String device_msg = "I2C device found at address 0x";
-      if (address < 16) {
-        device_msg += "0";
-      }
-      device_msg += String(address, HEX);
-      
-      // Identify common devices
-      if (address == 0x3C || address == 0x3D) {
-        device_msg += " (likely SSD1306 OLED display)";
-      }
-      else if (address == 0x0D) {
-        device_msg += " (likely QMC5883L compass)";
-      }
-      else if (address == 0x1E) {
-        device_msg += " (likely HMC5883L compass)";
-      }
-      else {
-        device_msg += " (unknown device)";
-      }
-      logMessage(device_msg); // Log the combined message
-      
-      nDevices++;
-    }
-  }
-  
-  if (nDevices == 0) {
-    logMessage("!!! WARNING: No I2C devices found !!!");
-    logMessage("Check connections and power to I2C devices");
-  } else {
-    String count_msg = "Found " + String(nDevices) + " I2C device(s)";
-    logMessage(count_msg); // Log the combined message
-  }
-  logMessage(""); // Log empty line
-} 
+ 
