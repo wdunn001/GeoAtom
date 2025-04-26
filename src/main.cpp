@@ -119,7 +119,7 @@ void drawPrivacyIndicator(Adafruit_SSD1306 &display) {
 // GPS setup
 TinyGPSPlus gps;
 HardwareSerial GPS(1);  // Using UART1 for GPS
-HardwareSerial Host(2); // Using UART2 for NMEA forwarding to PC/TTL converter
+HardwareSerial Radio(2); // Using UART2 for NMEA forwarding to Radio/TTL converter
 unsigned long gpsBaudRate = 0; // Variable to store GPS baud rate
 int altitudeCorrection = 0; // Altitude correction factor in meters - Set to 0
 CompassInterface* activeCompass = nullptr;
@@ -210,14 +210,13 @@ const char* KEY_USE_M5_INTERFERENCE = "useM5Interf";  // Key for M5Stack interfe
 #define GPS_RX 23 // ESP32 RX pin connected to BN-880 TX
 #define GPS_TX 33  // ESP32 TX pin connected to BN-880 RX
 
-// TTL to RS232 level converter connections (Optional Host Output)
-#define HOST_RX 22  // ESP32 RX pin connected to TTL TX
-#define HOST_TX 19  // ESP32 TX pin connected to TTL RX
+// TTL to RS232 level converter connections (Optional Radio Output)
+#define RADIO_RX 22  // ESP32 RX pin connected to TTL TX
+#define RADIO_TX 19  // ESP32 TX pin connected to TTL RX
 // --------------------------------------------------------------
 
-// Logging function - sends to Host serial and adds to buffer
-void logMessage(const String& msg) {
-  Host.println(msg); // Keep sending to serial
+// Logging function - sends to Radio serial and adds to buffer
+void logMessage(const String& msg) {// Keep sending to serial
   
   // Only add to buffer if it's an error, warning, or failure message
   if (msg.startsWith("ERROR") || 
@@ -452,6 +451,7 @@ void handleLongPressLogDisplay();
 
 // Function prototypes
 void scanI2CDevices();
+void forwardNMEAToICOM();
 
 // Define a type for button handler functions for clarity
 typedef void (*ButtonHandlerFunc)();
@@ -502,11 +502,11 @@ void setup() {
   display.display();
 
 
-  // Initialize Host serial for debug
-  Host.begin(4800, SERIAL_8N1, HOST_RX, HOST_TX);
+  // Initialize Radio serial for debug
+  Radio.begin(4800, SERIAL_8N1, RADIO_RX, RADIO_TX);
   logMessage("System initializing...");
 
-    // --- Initialize GPS with Configuration --- 
+  // --- Initialize GPS with Configuration --- 
   logMessage("Initializing GPS module...");
   gpsBaudRate = 115200; // Start with default baud rate
   bool gpsInitSuccess = false; // **** THIS IS THE ONLY DECLARATION ****
@@ -517,10 +517,9 @@ void setup() {
 
   if (GPS) { // Check if serial port opened successfully
     logMessage("GPS Serial Port OK. Configuring NMEA...");
-    GPSConfigurator gpsConfig(GPS);  // Changed from GPSConfigurator to GPSConfigurator
-    // bool configSuccess = true; // Local variable, not needed for this logic flow
+    GPSConfigurator gpsConfig(GPS);
 
-    // Set update rate to 10Hz
+    // Set update rate to 1Hz (standard for most GPS receivers)
     if (!gpsConfig.setUpdateRateHz(1)) {
       logMessage("Failed to set GPS update rate (continuing)");
     }
@@ -543,10 +542,8 @@ void setup() {
         logMessage("  Sending enable command for: " + String(msgNames[i]) + "...");
         // enableNmeaMessage sends the command but doesn't wait for ACK/NACK
         if (gpsConfig.enableNmeaMessage(nmeaClass, msgIds[i], true)) {
-             // We can only confirm the command was *sent*
-             // logMessage("    -> Command sent successfully."); 
+             logMessage("    -> Command sent successfully."); 
         } else {
-            // This case likely won't happen unless sendUbxCommand fails, but good practice
             logMessage("ERROR: Failed to *send* enable command for " + String(msgNames[i]));
             anyNmeaFail = true; 
         }
@@ -557,24 +554,22 @@ void setup() {
         logMessage("Warning: Failed to *send* one or more NMEA enable commands.");
     } else {
         logMessage("All NMEA enable commands sent successfully.");
-        // Note: This doesn't guarantee the GPS *accepted* all commands.
     }
 
     logMessage("Attempting to save GPS configuration...");
     if (gpsConfig.saveConfiguration()) {
       logMessage("GPS configuration save command sent.");
-      gpsInitSuccess = true; // Assign value to the single variable
+      gpsInitSuccess = true;
     } else {
       logMessage("Failed to send save GPS configuration command.");
-      // Keep gpsInitSuccess as false if save fails
     }
 
   } else {
     logMessage("*** ERROR: Failed to open GPS Serial Port! ***");
-    gpsInitSuccess = false; // Assign value to the single variable
+    gpsInitSuccess = false;
   }
 
-  gpsInitialized = gpsInitSuccess; // Use the single variable here
+  gpsInitialized = gpsInitSuccess;
   if (gpsInitialized) {
       logMessage("GPS initialization sequence complete (check logs for details).");
   } else {
@@ -831,9 +826,14 @@ void loop() {
     longPressHandled = false;  // Reset on release
   }
 
-  // Always read compass data if available
-  if (activeCompass != nullptr) {
+  // Add static variable to track last compass update time
+  static unsigned long lastCompassUpdate = 0;
+  const unsigned long COMPASS_UPDATE_INTERVAL = 100; // Update compass every 100ms (10Hz)
+
+  // Read compass data if available and enough time has passed
+  if (activeCompass != nullptr && (millis() - lastCompassUpdate >= COMPASS_UPDATE_INTERVAL)) {
     activeCompass->read();
+    lastCompassUpdate = millis();
   }
 
   // Process any available GPS data
@@ -841,6 +841,9 @@ void loop() {
     while (GPS.available()) {
       gps.encode(GPS.read());
     }
+    
+    // Forward NMEA messages to Radio
+    forwardNMEAToICOM();
   }
 
   // Basic display update
@@ -1558,20 +1561,32 @@ void displayLogOnOLED() {
   display.print(" Err/s ");
   display.print(errorsPerSecond, 1);
 
-  // Display course and speed
+  // Display course and speed in a single line
   if (gps.course.isValid() && gps.speed.isValid()) {
     display.setCursor(0, 52); // Adjusted Y position
-    display.print("Course: ");
-    display.print(gps.course.deg());
-    display.println(" deg");
+    display.print("Hdg ");
     
-    display.setCursor(64, 52); // Adjusted X position for speed
-    display.print("Spd: ");
+    // Get direction abbreviation
+    int course = gps.course.deg();
+    String direction = "";
+    if (course >= 337.5 || course < 22.5) direction = "N";
+    else if (course >= 22.5 && course < 67.5) direction = "NE";
+    else if (course >= 67.5 && course < 112.5) direction = "E";
+    else if (course >= 112.5 && course < 157.5) direction = "SE";
+    else if (course >= 157.5 && course < 202.5) direction = "S";
+    else if (course >= 202.5 && course < 247.5) direction = "SW";
+    else if (course >= 247.5 && course < 292.5) direction = "W";
+    else direction = "NW";
+    
+    display.print(direction);
+    display.print(" ");
+    
+    // Display speed
     float speedKmph = gps.speed.kmph();
     bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
     if (!reliableSpeed || speedKmph < 3.0) speedKmph = 0;
     display.print(speedKmph, 1);
-    // Removed "km/h" to save space
+    display.print("km/h");
   }
 
   // Draw privacy indicator if privacy mode is enabled
@@ -1857,8 +1872,8 @@ void displayLogMessages() {
 void handleShortPressLogDisplay() {
   // If no errors, go to next screen immediately
   if (log_buffer.empty()) {
-    currentDisplayMode = DisplayMode::GPS_STATUS;
-    logMessage("Display mode changed to: GPS_STATUS");
+    currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
+    logMessage("Display mode changed to: GRAPHIC_COMPASS");
     return;
   }
   
@@ -1881,6 +1896,43 @@ void enterLogDisplayMode() {
   currentLogIndex = 0; // Reset to most recent message
   currentDisplayMode = DisplayMode::LOG_DISPLAY;
   displayLogMessages();
+}
+
+// Add this function to forward NMEA messages to the Radio
+void forwardNMEAToICOM() {
+  static String nmeaBuffer;
+  static unsigned long lastForwardTime = 0;
+  const unsigned long FORWARD_INTERVAL = 1000; // Forward every second
+
+  if (millis() - lastForwardTime >= FORWARD_INTERVAL) {
+    if (gps.location.isValid()) {
+      // Construct GGA message
+      String ggaMessage = "$GPGGA,";
+      ggaMessage += String(gps.time.hour()) + String(gps.time.minute()) + String(gps.time.second()) + ".00,";
+      ggaMessage += String(abs(gps.location.lat()), 4) + (gps.location.lat() < 0 ? "S," : "N,");
+      ggaMessage += String(abs(gps.location.lng()), 4) + (gps.location.lng() < 0 ? "W," : "E,");
+      ggaMessage += "1,"; // Fix quality
+      ggaMessage += String(gps.satellites.value()) + ",";
+      ggaMessage += String(gps.hdop.hdop(), 1) + ",";
+      ggaMessage += String(gps.altitude.meters() + altitudeCorrection, 1) + ",M,";
+      ggaMessage += "0.0,M,,"; // Geoid separation and age of diff
+
+      // Calculate checksum
+      uint8_t checksum = 0;
+      for (size_t i = 1; i < ggaMessage.length(); i++) {
+        checksum ^= ggaMessage[i];
+      }
+      ggaMessage += "*";
+      if (checksum < 16) ggaMessage += "0";
+      ggaMessage += String(checksum, HEX);
+      ggaMessage += "\r\n";
+
+      // Send to Radio
+      Radio.print(ggaMessage);
+      logMessage("Forwarded GGA to Radio: " + ggaMessage);
+    }
+    lastForwardTime = millis();
+  }
 }
 
 
