@@ -89,6 +89,7 @@ void displayCompassLogOnOLED();
 void displayGraphicCompass();
 void displayWorldMap();
 void displayLogMessages();
+void displayRadioSettings();
 void calculateAndApplyCalibration(); // New calibration function
 void setDeclinationFromGPS(float lat, float lng); // Auto declination based on GPS position
 void applyPrivacyFilter(); // Stub - Replaced by getLatitude() and getLongitude() wrappers
@@ -115,6 +116,22 @@ void drawPrivacyIndicator(Adafruit_SSD1306 &display) {
     display.drawPixel(x + 3, y + 6, SSD1306_BLACK);
     display.drawPixel(x + 2, y + 7, SSD1306_BLACK);
   }
+}
+
+// Add this function to draw a save icon
+void drawSaveIcon(Adafruit_SSD1306 &display) {
+  // Draw a floppy disk icon at top-right corner
+  int x = display.width() - 10;
+  int y = 2;
+  
+  // Disk body
+  display.fillRect(x, y, 8, 8, SSD1306_WHITE);
+  
+  // Disk label
+  display.drawRect(x + 2, y + 2, 4, 4, SSD1306_BLACK);
+  
+  // Disk shutter
+  display.drawRect(x - 1, y + 1, 2, 6, SSD1306_WHITE);
 }
 
 // GPS setup
@@ -165,7 +182,7 @@ std::vector<String> log_buffer; // Historical log buffer
 // bool show_log_on_oled = false; // Replaced by currentDisplayMode
 
 // Display Modes Enum
-enum class DisplayMode { GPS_STATUS, COMPASS_STATUS, GRAPHIC_COMPASS, WORLD_MAP, LOG_DISPLAY };
+enum class DisplayMode { GPS_STATUS, COMPASS_STATUS, GRAPHIC_COMPASS, WORLD_MAP, LOG_DISPLAY, RADIO_SETTINGS };
 DisplayMode currentDisplayMode = DisplayMode::GRAPHIC_COMPASS; // Start in graphic compass mode
 
 // Variables to hold latest status for fixed display
@@ -373,6 +390,7 @@ enum class UIState {
   COMPASS_STATUS_SCREEN,
   GRAPHIC_COMPASS_SCREEN,
   WORLD_MAP_SCREEN,
+  RADIO_SETTINGS_SCREEN,
   
   // Configuration modes
   ALTITUDE_CORRECTION_MODE,
@@ -427,6 +445,9 @@ UIState determineCurrentUIState() {
       case DisplayMode::LOG_DISPLAY:
         detectedState = UIState::LOG_DISPLAY;
         break;
+      case DisplayMode::RADIO_SETTINGS:
+        detectedState = UIState::RADIO_SETTINGS_SCREEN;
+        break;
       default:
         detectedState = UIState::GRAPHIC_COMPASS_SCREEN;
         break;
@@ -457,10 +478,15 @@ void handleShortPressInversion();
 void handleLongPressInversion();
 void handleShortPressLogDisplay();
 void handleLongPressLogDisplay();
-
+void handleShortPressRadioSettings();
+void handleLongPressRadioSettings();
+void handleShortPressRadioSettings();
+void handleLongPressRadioSettings();
+void handleDoubleClickRadioSettings();
 // Function prototypes
 void scanI2CDevices();
 void forwardNMEAToICOM();
+
 
 // Define a type for button handler functions for clarity
 typedef void (*ButtonHandlerFunc)();
@@ -469,6 +495,7 @@ typedef void (*ButtonHandlerFunc)();
 struct ButtonHandlers {
     ButtonHandlerFunc shortPressHandler;
     ButtonHandlerFunc longPressHandler;
+    ButtonHandlerFunc doubleClickHandler;
 };
 
 // Create a map from UIState to button handlers
@@ -488,11 +515,39 @@ static float packetsPerSecond = 0.0f;
 static int currentLogIndex = 0;  // Index of the current message being displayed
 static const int MESSAGES_PER_PAGE = 1; // Show one message at a time
 
+// Radio Settings Variables
+int radioVolume = 50;
+int radioSquelch = 20;
+bool radioGPSDisplay = true;
+bool radioGPSA = true;
+int radioGPSBaudRate = 4800;
+int radioFrequency = 145000000; // Default to 2m band
+String radioMode = "FM"; // Default mode
+int radioPowerLevel = 50; // Power level in watts
+String radioDStarCallSign = ""; // D-STAR callsign
+String radioDStarMessage = ""; // D-STAR message
+int radioMemoryChannel = 0; // Current memory channel
+int radioSettingIndex = 0; // Current setting being edited
+bool isEditingSetting = false; // Whether we're in edit mode
+
+// Add these variables near the top with other global variables
+static unsigned long lastButtonReleaseTime = 0;
+static bool waitingForDoubleClick = false;
+const unsigned long DOUBLE_CLICK_TIMEOUT = 300; // 300ms to detect double click
+
+// Add this near the top with other global variables
+static unsigned long lastScreenChangeTime = 0;
+const unsigned long SCREEN_CHANGE_DEBOUNCE = 500; // 500ms debounce after screen change
+
 void setup() {
   // Initialize M5 hardware with proper configuration for M5Atom Echo
   auto cfg = M5.config();
   cfg.serial_baudrate = 0;  // Disable M5 serial
   M5.begin(cfg);
+
+  // Configure button timing
+  M5.BtnA.setDebounceThresh(20);  // 20ms debounce
+  M5.BtnA.setHoldThresh(1000);    // 1000ms for long press
 
   // Initialize I2C
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -638,16 +693,17 @@ void setup() {
   delay(1000);  // Show ready message for 1 second
 
   // Initialize the button handler map
-  buttonHandlerMap[UIState::GPS_STATUS_SCREEN] = ButtonHandlers{handleShortPressGPSStatus, handleLongPressGPSStatus};
-  buttonHandlerMap[UIState::COMPASS_STATUS_SCREEN] = ButtonHandlers{handleShortPressCompassStatus, handleLongPressCompassStatus};
-  buttonHandlerMap[UIState::GRAPHIC_COMPASS_SCREEN] = ButtonHandlers{handleShortPressGraphicCompass, handleLongPressGraphicCompass};
-  buttonHandlerMap[UIState::WORLD_MAP_SCREEN] = ButtonHandlers{handleShortPressWorldMap, handleLongPressWorldMap};
-  buttonHandlerMap[UIState::ALTITUDE_CORRECTION_MODE] = ButtonHandlers{handleShortPressAltitudeCorrection, handleLongPressAltitudeCorrection};
-  buttonHandlerMap[UIState::CALIBRATION_MODE_SELECTION] = ButtonHandlers{handleShortPressCalibrationModeSelection, handleLongPressCalibrationModeSelection};
-  buttonHandlerMap[UIState::CALIBRATING_COMPASS] = ButtonHandlers{handleShortPressCalibrating, handleLongPressCalibrating};
-  buttonHandlerMap[UIState::SETTING_DECLINATION] = ButtonHandlers{handleShortPressDeclination, handleLongPressDeclination};
-  buttonHandlerMap[UIState::SETTING_INVERSION] = ButtonHandlers{handleShortPressInversion, handleLongPressInversion};
-  buttonHandlerMap[UIState::LOG_DISPLAY] = ButtonHandlers{handleShortPressLogDisplay, handleLongPressLogDisplay};
+  buttonHandlerMap[UIState::GPS_STATUS_SCREEN] = ButtonHandlers{handleShortPressGPSStatus, handleLongPressGPSStatus, nullptr};
+  buttonHandlerMap[UIState::COMPASS_STATUS_SCREEN] = ButtonHandlers{handleShortPressCompassStatus, handleLongPressCompassStatus, nullptr};
+  buttonHandlerMap[UIState::GRAPHIC_COMPASS_SCREEN] = ButtonHandlers{handleShortPressGraphicCompass, handleLongPressGraphicCompass, nullptr};
+  buttonHandlerMap[UIState::WORLD_MAP_SCREEN] = ButtonHandlers{handleShortPressWorldMap, handleLongPressWorldMap, nullptr};
+  buttonHandlerMap[UIState::ALTITUDE_CORRECTION_MODE] = ButtonHandlers{handleShortPressAltitudeCorrection, handleLongPressAltitudeCorrection, nullptr};
+  buttonHandlerMap[UIState::CALIBRATION_MODE_SELECTION] = ButtonHandlers{handleShortPressCalibrationModeSelection, handleLongPressCalibrationModeSelection, nullptr};
+  buttonHandlerMap[UIState::CALIBRATING_COMPASS] = ButtonHandlers{handleShortPressCalibrating, handleLongPressCalibrating, nullptr};
+  buttonHandlerMap[UIState::SETTING_DECLINATION] = ButtonHandlers{handleShortPressDeclination, handleLongPressDeclination, nullptr};
+  buttonHandlerMap[UIState::SETTING_INVERSION] = ButtonHandlers{handleShortPressInversion, handleLongPressInversion, nullptr};
+  buttonHandlerMap[UIState::LOG_DISPLAY] = ButtonHandlers{handleShortPressLogDisplay, handleLongPressLogDisplay, nullptr};
+  buttonHandlerMap[UIState::RADIO_SETTINGS_SCREEN] = ButtonHandlers{handleShortPressRadioSettings, handleLongPressRadioSettings, handleDoubleClickRadioSettings};
   
   
   // Initialize display
@@ -816,27 +872,45 @@ void loop() {
   // Basic hardware update - must happen first
   M5.update();
 
-  // Simple button check with hold threshold
-  M5.BtnA.setHoldThresh(800);  // Set long press threshold to 800ms
-  
-  UIState currentState = determineCurrentUIState();
-  auto handlers = buttonHandlerMap[currentState];
-  
-  static bool longPressHandled = false;
-  
-  // Handle long press first
+  // Determine current UI state before handling button presses
+  currentUIState = determineCurrentUIState();
+
+  // Handle button presses based on current UI state
   if (M5.BtnA.wasHold()) {
-    if (!longPressHandled && handlers.longPressHandler) {
-      handlers.longPressHandler();
-      longPressHandled = true;
+    if (buttonHandlerMap[currentUIState].longPressHandler) {
+      buttonHandlerMap[currentUIState].longPressHandler();
+      lastScreenChangeTime = millis(); // Record screen change time
+    }
+    waitingForDoubleClick = false; // Reset double click state
+  }
+  else if (M5.BtnA.wasReleased()) {
+    // Skip button handling if we're within the debounce period
+    if (millis() - lastScreenChangeTime < SCREEN_CHANGE_DEBOUNCE) {
+      waitingForDoubleClick = false;
+      return;
+    }
+
+    unsigned long currentTime = millis();
+    
+    if (waitingForDoubleClick && (currentTime - lastButtonReleaseTime < DOUBLE_CLICK_TIMEOUT)) {
+      // Double click detected
+      if (buttonHandlerMap[currentUIState].doubleClickHandler) {
+        buttonHandlerMap[currentUIState].doubleClickHandler();
+      }
+      waitingForDoubleClick = false;
+    } else {
+      // First click detected, wait for potential second click
+      waitingForDoubleClick = true;
+      lastButtonReleaseTime = currentTime;
     }
   }
-  // Handle short press only if no long press occurred
-  else if (M5.BtnA.wasReleased()) {
-    if (!longPressHandled && handlers.shortPressHandler) {
-      handlers.shortPressHandler();
+  else if (waitingForDoubleClick && (millis() - lastButtonReleaseTime >= DOUBLE_CLICK_TIMEOUT)) {
+    // Timeout reached, treat as single click
+    if (buttonHandlerMap[currentUIState].shortPressHandler) {
+      buttonHandlerMap[currentUIState].shortPressHandler();
+      lastScreenChangeTime = millis(); // Record screen change time
     }
-    longPressHandled = false;  // Reset on release
+    waitingForDoubleClick = false;
   }
 
   // Add static variable to track last compass update time
@@ -876,6 +950,9 @@ void loop() {
         break;
       case DisplayMode::LOG_DISPLAY:
         displayLogMessages();
+        break;
+      case DisplayMode::RADIO_SETTINGS:
+        displayRadioSettings();
         break;
     }
   }
@@ -946,7 +1023,6 @@ void displayWorldMap() {
  
  
 void handleShortPressWorldMap() {
-  // Short press on World Map: Cycle to next display mode
   currentDisplayMode = DisplayMode::GPS_STATUS;
   logMessage("Display mode changed to: GPS_STATUS");
 }
@@ -1234,6 +1310,16 @@ void handleLongPressInversion() {
 
 void displayCompassLogOnOLED() {
   if (!display_initialized) return;
+
+  // Add static variable to track last update time
+  static unsigned long lastUpdateTime = 0;
+  const unsigned long UPDATE_INTERVAL = 100; // Update every 100ms (10Hz)
+
+  // Check if enough time has passed since last update
+  if (millis() - lastUpdateTime < UPDATE_INTERVAL) {
+    return; // Skip this update
+  }
+  lastUpdateTime = millis();
 
   display.clearDisplay();
   display.setTextSize(1);
@@ -1757,9 +1843,10 @@ void displayGraphicCompass() {
   display.display();
 }
 void handleShortPressGraphicCompass() {
-  // Switch to next screen
-  currentDisplayMode = DisplayMode::WORLD_MAP;
-  logMessage("Display mode changed to: WORLD_MAP");
+ 
+    currentDisplayMode = DisplayMode::WORLD_MAP;
+    logMessage("Display mode changed to: WORLD_MAP");
+
 }
 void handleLongPressGraphicCompass() {
   // Toggle compass inversion
@@ -1899,8 +1986,8 @@ void handleShortPressLogDisplay() {
 
 void handleLongPressLogDisplay() {
     // Switch to next screen
-  currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
-  logMessage("Display mode changed to: GRAPHIC_COMPASS");
+  currentDisplayMode = DisplayMode::RADIO_SETTINGS;
+  logMessage("Display mode changed to: RADIO_SETTINGS");
 
 }
 
@@ -1916,6 +2003,216 @@ void forwardNMEAToICOM() {
     if (radioConfig != nullptr) {
         radioConfig->forwardNMEAToRadio(gps, altitudeCorrection);
     }
+}
+
+// Add new display function
+void displayRadioSettings() {
+  if (!display_initialized) return;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Center the title
+  String title = "--- Radio Settings ---";
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 0);
+  display.println(title);
+
+  // Define the settings area (leave space for command instructions at bottom)
+  const int SETTINGS_START_Y = 12;
+  const int SETTINGS_END_Y = SCREEN_HEIGHT - 24; // Leave space for scroll indicator and commands
+  const int SETTINGS_HEIGHT = SETTINGS_END_Y - SETTINGS_START_Y;
+  const int ITEMS_PER_PAGE = 4; // Number of settings to show at once
+
+  // Calculate which settings to show based on current index
+  int startIndex = (radioSettingIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
+  int endIndex = min(startIndex + ITEMS_PER_PAGE, 7); // 7 total items (5 settings + 2 actions)
+
+  // Display current settings with highlight for selected setting
+  for (int i = startIndex; i < endIndex; i++) {
+    int displayY = SETTINGS_START_Y + ((i - startIndex) * 10);
+    display.setCursor(0, displayY);
+    
+    if (i == radioSettingIndex) {
+      display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    
+    switch (i) {
+      case 0:
+        display.print("Freq: ");
+        display.print(radioFrequency / 1000000.0, 3);
+        display.print("MHz");
+        break;
+      case 1:
+        display.print("Mode: ");
+        display.print(radioMode);
+        break;
+      case 2:
+        display.print("Power: ");
+        display.print(radioPowerLevel);
+        display.print("W");
+        break;
+      case 3:
+        display.print("Mem: ");
+        display.print(radioMemoryChannel);
+        break;
+      case 4:
+        display.print("D-STAR: ");
+        if (radioDStarCallSign.length() > 0) {
+          display.print(radioDStarCallSign);
+        } else {
+          display.print("OFF");
+        }
+        break;
+      case 5:
+        display.print("Save & Exit");
+        break;
+      case 6:
+        display.print("Exit");
+        break;
+    }
+  }
+
+  // Show scroll indicator if there are more settings
+  if (startIndex > 0 || endIndex < 7) {
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(SCREEN_WIDTH - 8, SETTINGS_START_Y);
+    if (startIndex > 0) {
+      display.print("^"); // Up arrow
+    }
+    display.setCursor(SCREEN_WIDTH - 8, SETTINGS_END_Y - 8);
+    if (endIndex < 7) {
+      display.print("v"); // Down arrow
+    }
+  }
+
+  // Show navigation info at bottom
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, SCREEN_HEIGHT - 16);
+  if (isEditingSetting) {
+    display.print("Clk: ^ Dbl: v Hold:");
+    // Draw save icon
+    int x = display.getCursorX();
+    int y = display.getCursorY();
+    // Disk body
+    display.fillRect(x, y, 8, 8, SSD1306_WHITE);
+    // Disk label
+    display.drawRect(x + 2, y + 2, 4, 4, SSD1306_BLACK);
+    // Disk shutter
+    display.drawRect(x - 1, y + 1, 2, 6, SSD1306_WHITE);
+  } else {
+    display.print("Clk:Next  Hold:Edit");
+  }
+
+  display.display();
+}
+
+void handleShortPressRadioSettings() {
+  if (isEditingSetting) {
+    // Increment current setting
+    switch (radioSettingIndex) {
+      case 0: // Frequency
+        radioFrequency += 1000000; // Increment by 1MHz
+        if (radioFrequency > 148000000) radioFrequency = 144000000;
+        break;
+      case 1: // Mode
+        if (radioMode == "FM") radioMode = "AM";
+        else if (radioMode == "AM") radioMode = "LSB";
+        else if (radioMode == "LSB") radioMode = "USB";
+        else if (radioMode == "USB") radioMode = "CW";
+        else if (radioMode == "CW") radioMode = "FM";
+        break;
+      case 2: // Power Level
+        radioPowerLevel += 5;
+        if (radioPowerLevel > 100) radioPowerLevel = 5;
+        break;
+      case 3: // Memory Channel
+        radioMemoryChannel = (radioMemoryChannel + 1) % 100;
+        break;
+      case 4: // D-STAR
+        if (radioDStarCallSign.length() == 0) {
+          radioDStarCallSign = "N0CALL";
+          radioDStarMessage = "Hello";
+        } else {
+          radioDStarCallSign = "";
+          radioDStarMessage = "";
+        }
+        break;
+    }
+  } else {
+    // Select next setting/action
+    radioSettingIndex = (radioSettingIndex + 1) % 7;
+  }
+  displayRadioSettings();
+}
+
+void handleDoubleClickRadioSettings() {
+  if (isEditingSetting) {
+    // Decrement current setting
+    switch (radioSettingIndex) {
+      case 0: // Frequency
+        radioFrequency -= 1000000; // Decrement by 1MHz
+        if (radioFrequency < 144000000) radioFrequency = 148000000;
+        break;
+      case 1: // Mode
+        if (radioMode == "FM") radioMode = "CW";
+        else if (radioMode == "CW") radioMode = "USB";
+        else if (radioMode == "USB") radioMode = "LSB";
+        else if (radioMode == "LSB") radioMode = "AM";
+        else if (radioMode == "AM") radioMode = "FM";
+        break;
+      case 2: // Power Level
+        radioPowerLevel -= 5;
+        if (radioPowerLevel < 5) radioPowerLevel = 100;
+        break;
+      case 3: // Memory Channel
+        radioMemoryChannel = (radioMemoryChannel - 1 + 100) % 100;
+        break;
+      case 4: // D-STAR
+        if (radioDStarCallSign.length() == 0) {
+          radioDStarCallSign = "N0CALL";
+          radioDStarMessage = "Hello";
+        } else {
+          radioDStarCallSign = "";
+          radioDStarMessage = "";
+        }
+        break;
+    }
+    displayRadioSettings();
+  }
+  // No action in navigation mode
+}
+
+void handleLongPressRadioSettings() {
+  if (isEditingSetting) {
+    // Set current value and exit edit mode
+    isEditingSetting = false;
+    logMessage("Setting saved");
+  } else {
+    // Handle actions or enter edit mode
+    if (radioSettingIndex == 5) { // Save & Exit
+      currentDisplayMode = DisplayMode::LOG_DISPLAY;
+      logMessage("Radio settings saved");
+      return;
+    } else if (radioSettingIndex == 6) { // Exit
+      currentDisplayMode = DisplayMode::LOG_DISPLAY;
+      logMessage("Radio settings not saved");
+      return;
+    } else {
+      // Enter edit mode for current setting
+      isEditingSetting = true;
+      logMessage("Editing " + String(radioSettingIndex == 0 ? "Frequency" : 
+                                   radioSettingIndex == 1 ? "Mode" :
+                                   radioSettingIndex == 2 ? "Power" :
+                                   radioSettingIndex == 3 ? "Memory" : "D-STAR"));
+    }
+  }
+  displayRadioSettings();
 }
 
 

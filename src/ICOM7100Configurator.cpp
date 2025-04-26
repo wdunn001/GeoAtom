@@ -33,7 +33,7 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
 
     if (millis() - lastForwardTime >= FORWARD_INTERVAL) {
         if (gps.location.isValid()) {
-            // Construct GGA message
+            // Always send GGA (essential for position)
             String ggaMessage = "$GPGGA,";
             ggaMessage += String(gps.time.hour()) + String(gps.time.minute()) + String(gps.time.second()) + ".00,";
             ggaMessage += String(abs(gps.location.lat()), 4) + (gps.location.lat() < 0 ? "S," : "N,");
@@ -54,8 +54,80 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             ggaMessage += String(checksum, HEX);
             ggaMessage += "\r\n";
 
-            // Send to Radio
+            // Send GGA to Radio
             radioSerial.print(ggaMessage);
+
+            // If we have valid course and speed, send RMC
+            if (gps.course.isValid() && gps.speed.isValid()) {
+                String rmcMessage = "$GPRMC,";
+                rmcMessage += String(gps.time.hour()) + String(gps.time.minute()) + String(gps.time.second()) + ".00,";
+                rmcMessage += "A,"; // Status (A=active)
+                rmcMessage += String(abs(gps.location.lat()), 4) + (gps.location.lat() < 0 ? "S," : "N,");
+                rmcMessage += String(abs(gps.location.lng()), 4) + (gps.location.lng() < 0 ? "W," : "E,");
+                rmcMessage += String(gps.speed.knots(), 1) + ","; // Speed in knots
+                rmcMessage += String(gps.course.deg(), 1) + ","; // Course in degrees
+                rmcMessage += String(gps.date.day()) + String(gps.date.month()) + String(gps.date.year() % 100) + ","; // Date
+                rmcMessage += "0.0,E,"; // Magnetic variation (not used)
+
+                // Calculate checksum
+                checksum = 0;
+                for (size_t i = 1; i < rmcMessage.length(); i++) {
+                    checksum ^= rmcMessage[i];
+                }
+                rmcMessage += "*";
+                if (checksum < 16) rmcMessage += "0";
+                rmcMessage += String(checksum, HEX);
+                rmcMessage += "\r\n";
+
+                // Send RMC to Radio
+                radioSerial.print(rmcMessage);
+            }
+
+            // If we have valid satellite info, send GSV
+            if (gps.satellites.isValid()) {
+                String gsvMessage = "$GPGSV,";
+                gsvMessage += "1,"; // Number of messages
+                gsvMessage += "1,"; // Message number
+                gsvMessage += String(gps.satellites.value()) + ","; // Number of satellites in view
+                gsvMessage += "0,0,0,0,"; // Satellite info (not available in TinyGPS++)
+                gsvMessage += "0,0,0,0,"; // More satellite info
+                gsvMessage += "0,0,0,0"; // Final satellite info
+
+                // Calculate checksum
+                checksum = 0;
+                for (size_t i = 1; i < gsvMessage.length(); i++) {
+                    checksum ^= gsvMessage[i];
+                }
+                gsvMessage += "*";
+                if (checksum < 16) gsvMessage += "0";
+                gsvMessage += String(checksum, HEX);
+                gsvMessage += "\r\n";
+
+                // Send GSV to Radio
+                radioSerial.print(gsvMessage);
+            }
+
+            // Always send GSA (DOP and active satellites)
+            String gsaMessage = "$GPGSA,";
+            gsaMessage += "A,"; // Auto selection
+            gsaMessage += "3,"; // 3D fix
+            gsaMessage += "0,0,0,0,0,0,0,0,0,0,0,0,0,"; // PRNs of satellites used
+            gsaMessage += String(gps.hdop.hdop(), 1) + ","; // PDOP
+            gsaMessage += String(gps.hdop.hdop(), 1) + ","; // HDOP
+            gsaMessage += String(gps.hdop.hdop(), 1); // VDOP
+
+            // Calculate checksum
+            checksum = 0;
+            for (size_t i = 1; i < gsaMessage.length(); i++) {
+                checksum ^= gsaMessage[i];
+            }
+            gsaMessage += "*";
+            if (checksum < 16) gsaMessage += "0";
+            gsaMessage += String(checksum, HEX);
+            gsaMessage += "\r\n";
+
+            // Send GSA to Radio
+            radioSerial.print(gsaMessage);
         }
         lastForwardTime = millis();
     }
@@ -155,7 +227,7 @@ void ICOM7100Configurator::disableGPSA() {
 
 // Initialize radio with default settings
 void ICOM7100Configurator::initialize() {
-    // Set default GPS baud rate
+    // Set default GPS baud rate to match our GPS module
     setGPSBaudRate(4800);
     
     // Enable GPS display
@@ -166,4 +238,7 @@ void ICOM7100Configurator::initialize() {
     
     // Set default squelch
     setSquelch(20);
+
+    // Enable GPS-A functionality
+    enableGPSA();
 } 
