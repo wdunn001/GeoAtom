@@ -3,9 +3,6 @@
     "m5AtomEcho": [
       "When working with M5Atom Echo, always initialize M5Unified with disabled serial using: auto cfg = M5.config(); cfg.serial_baudrate = 0; M5.begin(cfg);",
       "Use these build flags in platformio.ini for M5Atom Echo: -D ARDUINO_USB_MODE=1 -D ARDUINO_USB_CDC_ON_BOOT=1 -D DISABLE_SERIAL=1 -D DISABLE_SERIALEVENT=1",
-      "For I2C communication in M5Atom Echo, use these pins: Wire.begin(26, 32); // SDA=26, SCL=32 for both compass and display",
-      "For UART communication with GPS modules, use explicit pins: GPS.begin(9600, SERIAL_8N1, 22, 19); // RX=22 (from GPS TX), TX=19 (to GPS RX)",
-      "For UART communication with host/TTL converter, use: Host.begin(9600, SERIAL_8N1, 21, 25); // RX=21 (from TTL TX), TX=25 (to TTL RX)"
     ],
     "platformIO": [
       "Always pin library versions in platformio.ini: lib_deps = m5stack/M5Unified@^0.2.5",

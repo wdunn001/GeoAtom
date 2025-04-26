@@ -124,8 +124,6 @@ HardwareSerial GPS(1);  // Using UART1 for GPS
 HardwareSerial Host(2); // Using UART2 for NMEA forwarding to PC/TTL converter
 unsigned long gpsBaudRate = 0; // Variable to store GPS baud rate
 int altitudeCorrection = 0; // Altitude correction factor in meters - Set to 0
-
-// Replace old compass setup with interface pointer 
 CompassInterface* activeCompass = nullptr;
 QMC5883LCompassImpl qmcCompass;
 HMC5883LCompassImpl hmcCompass;
@@ -207,16 +205,16 @@ const char* KEY_USE_M5_INTERFERENCE = "useM5Interf";  // Key for M5Stack interfe
 // Pin definitions based on physical connections
 // --- Verified Working Configuration for BN-880 & M5Atom Echo ---
 // I2C pins - shared between compass (BN-880) and display (SSD1306)
-#define I2C_SDA 26 // Grove Pin 1
-#define I2C_SCL 32 // Grove Pin 2
+#define I2C_SDA 25 // Grove Pin 1
+#define I2C_SCL 21 // Grove Pin 2
 
 // GPS module connections (BN-880 UART)
-#define GPS_RX 25  // ESP32 RX pin connected to BN-880 TX
-#define GPS_TX 21  // ESP32 TX pin connected to BN-880 RX
+#define GPS_RX 23 // ESP32 RX pin connected to BN-880 TX
+#define GPS_TX 33  // ESP32 TX pin connected to BN-880 RX
 
 // TTL to RS232 level converter connections (Optional Host Output)
-#define HOST_RX 33  // ESP32 RX pin connected to TTL TX
-#define HOST_TX 23  // ESP32 TX pin connected to TTL RX
+#define HOST_RX 22  // ESP32 RX pin connected to TTL TX
+#define HOST_TX 19  // ESP32 TX pin connected to TTL RX
 // --------------------------------------------------------------
 
 // Logging function - sends to Host serial and adds to buffer
@@ -525,6 +523,11 @@ const unsigned long GPS_CONFIG_RETRY_DELAY = 100; // 100ms between retries
 const uint8_t MAX_GPS_INIT_RETRIES = 3;  // Maximum number of initialization attempts
 bool gpsInitialized = false;  // Track if GPS was successfully initialized
 
+// Add these variables near the top with other global variables
+static unsigned long lastPacketCount = 0;
+static unsigned long lastPacketTime = 0;
+static float packetsPerSecond = 0.0f;
+
 void setup() {
   // Initialize M5 hardware with minimal configuration
   auto cfg = M5.config();
@@ -547,89 +550,103 @@ void setup() {
   display.println("Starting...");
   display.display();
 
-  // Initialize GPS with basic settings
-  GPS.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
-  gpsInitialized = true;
 
   // Initialize Host serial for debug
-  Host.begin(9600, SERIAL_8N1, HOST_RX, HOST_TX);
+  Host.begin(4800, SERIAL_8N1, HOST_RX, HOST_TX);
   logMessage("System initializing...");
 
   // --- Initialize GPS with Configuration --- 
   logMessage("Initializing GPS module...");
-  gpsBaudRate = 9600; // Start with default baud rate
+   // Initialize GPS with validation and retry logic
+  logMessage("Initializing GPS module...");
+  gpsBaudRate = 115200;  // Start with default baud rate
+  
   bool gpsInitSuccess = false; // **** THIS IS THE ONLY DECLARATION ****
-
-  // Basic GPS serial start needed before configuration
-  GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
-  delay(100); // Small delay for serial port
-
-  if (GPS) { // Check if serial port opened successfully
-    logMessage("GPS Serial Port OK. Configuring NMEA...");
-    GPSConfigurator gpsConfig(GPS);
-    // bool configSuccess = true; // Local variable, not needed for this logic flow
-
-    // Set update rate to 10Hz
-    if (!gpsConfig.setUpdateRateHz(10)) {
-      logMessage("Failed to set GPS update rate (continuing)");
+  uint8_t initAttempts = 0;
+ 
+  while (!gpsInitSuccess && initAttempts < MAX_GPS_INIT_RETRIES) {
+    initAttempts++;
+    logMessage("GPS init attempt " + String(initAttempts) + " of " + String(MAX_GPS_INIT_RETRIES));
+    
+    // Initialize GPS serial
+    GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
+    
+    // Wait for GPS to be ready
+    unsigned long startTime = millis();
+    bool receivedData = false;
+    
+    while (millis() - startTime < GPS_INIT_TIMEOUT) {
+      if (GPS.available()) {
+        receivedData = true;
+        break;
+      }
+      delay(10);
     }
-    delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
-
+    
+    if (!receivedData) {
+      logMessage("No response from GPS, retrying...");
+      GPS.end();
+      delay(GPS_CONFIG_RETRY_DELAY);
+      continue;
+    }
+    
+    // Configure GPS
+    GPSConfigurator gpsConfig(GPS);
+    bool configSuccess = true;  // Track if all configuration steps succeed
+    
+    
     // Set dynamic model to Portable (0)
     if (!gpsConfig.setDynamicModel(0)) {
-      logMessage("Failed to set GPS dynamic model (continuing)");
+      logMessage("Failed to set GPS dynamic model");
+      configSuccess = false;
     }
-    delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
-
-    // Enable essential NMEA messages (GGA, RMC, VTG, GSA, GSV, GLL)
-    logMessage("Attempting to enable NMEA Messages...");
-    const uint8_t nmeaClass = 0xF0;
-    const uint8_t msgIds[] = {0x00, 0x04, 0x05, 0x02, 0x03, 0x01};
-    const char* msgNames[] = {"GGA", "RMC", "VTG", "GSA", "GSV", "GLL"};
-    bool anyNmeaFail = false;
-
-    for (size_t i = 0; i < sizeof(msgIds) / sizeof(msgIds[0]); ++i) {
-        logMessage("  Sending enable command for: " + String(msgNames[i]) + "...");
-        // enableNmeaMessage sends the command but doesn't wait for ACK/NACK
-        if (gpsConfig.enableNmeaMessage(nmeaClass, msgIds[i], true)) {
-             // We can only confirm the command was *sent*
-             // logMessage("    -> Command sent successfully."); 
-        } else {
-            // This case likely won't happen unless sendUbxCommand fails, but good practice
-            logMessage("    -> ERROR: Failed to *send* enable command for " + String(msgNames[i]));
-            anyNmeaFail = true; 
-        }
-        delay(GPS_CONFIG_RETRY_DELAY / 2); 
+    
+    // Enable essential NMEA messages
+    if (!gpsConfig.enableNmeaMessage(0xF0, 0x00, true) ||  // GGA - Fix data
+        !gpsConfig.enableNmeaMessage(0xF0, 0x04, true) ||  // RMC - Recommended minimum data
+        !gpsConfig.enableNmeaMessage(0xF0, 0x05, true) ||  // VTG - Vector track and speed
+        !gpsConfig.enableNmeaMessage(0xF0, 0x02, true) ||  // GSA - DOP and active satellites
+        !gpsConfig.enableNmeaMessage(0xF0, 0x03, true) ||  // GSV - Satellites in view
+        !gpsConfig.enableNmeaMessage(0xF0, 0x01, true)) {  // GLL - Geographic position
+      logMessage("Failed to configure NMEA messages");
+      configSuccess = false;
     }
-
-    if (anyNmeaFail) {
-        logMessage("Warning: Failed to *send* one or more NMEA enable commands.");
-    } else {
-        logMessage("All NMEA enable commands sent successfully.");
-        // Note: This doesn't guarantee the GPS *accepted* all commands.
+    
+    // Save configuration if all steps succeeded
+    if (configSuccess) {
+      if (gpsConfig.saveConfiguration()) {
+        logMessage("GPS configuration saved successfully");
+        gpsInitSuccess = true;
+        break;
+      } else {
+        logMessage("Failed to save GPS configuration");
+      }
     }
-
-    logMessage("Attempting to save GPS configuration...");
-    if (gpsConfig.saveConfiguration()) {
-      logMessage("GPS configuration save command sent.");
-      gpsInitSuccess = true; // Assign value to the single variable
-    } else {
-      logMessage("Failed to send save GPS configuration command.");
-      // Keep gpsInitSuccess as false if save fails
-    }
-
+    
+    // If we get here, configuration failed
+    GPS.end();
+    delay(GPS_CONFIG_RETRY_DELAY);
+  }
+  
+  if (gpsInitSuccess) {
+    gpsInitialized = true;
+    logMessage("GPS initialized successfully");
+    logMessage("GPS Configuration:");
+    logMessage("- Baud Rate: " + String(gpsBaudRate));
+    logMessage("- Update Rate: 10Hz");
+    logMessage("- Dynamic Model: Portable");
+    logMessage("- NMEA Messages: GGA, RMC, VTG, GSA, GSV, GLL");
+    logMessage("  * GGA: Fix data (time, position, fix type)");
+    logMessage("  * RMC: Recommended minimum (pos, vel, time)");
+    logMessage("  * VTG: Vector track and ground speed");
+    logMessage("  * GSA: DOP and active satellites");
+    logMessage("  * GSV: Satellites in view");
+    logMessage("  * GLL: Geographic position");
   } else {
-    logMessage("*** ERROR: Failed to open GPS Serial Port! ***");
-    gpsInitSuccess = false; // Assign value to the single variable
+    logMessage("*** WARNING: GPS initialization failed after " + String(MAX_GPS_INIT_RETRIES) + " attempts ***");
+    logMessage("System will continue but GPS functionality may be limited");
   }
 
-  gpsInitialized = gpsInitSuccess; // Use the single variable here
-  if (gpsInitialized) {
-      logMessage("GPS initialization sequence complete (check logs for details).");
-  } else {
-      logMessage("*** WARNING: GPS initialization sequence failed or incomplete. ***");
-  }
-  // --- End GPS Initialization ---
 
   // Try to initialize compass
   if (qmcCompass.begin()) {
@@ -854,99 +871,6 @@ void setup() {
   useM5StackInterference = preferences.getBool(KEY_USE_M5_INTERFERENCE, false);
   preferences.end();
 
-  // Initialize GPS with validation and retry logic
-  logMessage("Initializing GPS module...");
-  gpsBaudRate = 9600;  // Start with default baud rate
-  
-  uint8_t initAttempts = 0;
- 
-  while (!gpsInitSuccess && initAttempts < MAX_GPS_INIT_RETRIES) {
-    initAttempts++;
-    logMessage("GPS init attempt " + String(initAttempts) + " of " + String(MAX_GPS_INIT_RETRIES));
-    
-    // Initialize GPS serial
-    GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
-    
-    // Wait for GPS to be ready
-    unsigned long startTime = millis();
-    bool receivedData = false;
-    
-    while (millis() - startTime < GPS_INIT_TIMEOUT) {
-      if (GPS.available()) {
-        receivedData = true;
-        break;
-      }
-      delay(10);
-    }
-    
-    if (!receivedData) {
-      logMessage("No response from GPS, retrying...");
-      GPS.end();
-      delay(GPS_CONFIG_RETRY_DELAY);
-      continue;
-    }
-    
-    // Configure GPS
-    GPSConfigurator gpsConfig(GPS);
-    bool configSuccess = true;  // Track if all configuration steps succeed
-    
-    // Set update rate to 10Hz
-    if (!gpsConfig.setUpdateRateHz(10)) {
-      logMessage("Failed to set GPS update rate");
-      configSuccess = false;
-    }
-    
-    // Set dynamic model to Portable (0)
-    if (!gpsConfig.setDynamicModel(0)) {
-      logMessage("Failed to set GPS dynamic model");
-      configSuccess = false;
-    }
-    
-    // Enable essential NMEA messages
-    if (!gpsConfig.enableNmeaMessage(0xF0, 0x00, true) ||  // GGA - Fix data
-        !gpsConfig.enableNmeaMessage(0xF0, 0x04, true) ||  // RMC - Recommended minimum data
-        !gpsConfig.enableNmeaMessage(0xF0, 0x05, true) ||  // VTG - Vector track and speed
-        !gpsConfig.enableNmeaMessage(0xF0, 0x02, true) ||  // GSA - DOP and active satellites
-        !gpsConfig.enableNmeaMessage(0xF0, 0x03, true) ||  // GSV - Satellites in view
-        !gpsConfig.enableNmeaMessage(0xF0, 0x01, true)) {  // GLL - Geographic position
-      logMessage("Failed to configure NMEA messages");
-      configSuccess = false;
-    }
-    
-    // Save configuration if all steps succeeded
-    if (configSuccess) {
-      if (gpsConfig.saveConfiguration()) {
-        logMessage("GPS configuration saved successfully");
-        gpsInitSuccess = true;
-        break;
-      } else {
-        logMessage("Failed to save GPS configuration");
-      }
-    }
-    
-    // If we get here, configuration failed
-    GPS.end();
-    delay(GPS_CONFIG_RETRY_DELAY);
-  }
-  
-  if (gpsInitSuccess) {
-    gpsInitialized = true;
-    logMessage("GPS initialized successfully");
-    logMessage("GPS Configuration:");
-    logMessage("- Baud Rate: " + String(gpsBaudRate));
-    logMessage("- Update Rate: 10Hz");
-    logMessage("- Dynamic Model: Portable");
-    logMessage("- NMEA Messages: GGA, RMC, VTG, GSA, GSV, GLL");
-    logMessage("  * GGA: Fix data (time, position, fix type)");
-    logMessage("  * RMC: Recommended minimum (pos, vel, time)");
-    logMessage("  * VTG: Vector track and ground speed");
-    logMessage("  * GSA: DOP and active satellites");
-    logMessage("  * GSV: Satellites in view");
-    logMessage("  * GLL: Geographic position");
-  } else {
-    logMessage("*** WARNING: GPS initialization failed after " + String(MAX_GPS_INIT_RETRIES) + " attempts ***");
-    logMessage("System will continue but GPS functionality may be limited");
-  }
 
   // After all initialization is complete (at the end of setup()):
   if (display_initialized) {
@@ -973,6 +897,17 @@ void setup() {
     currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
     displayGraphicCompass();  // Show initial compass display
   }
+
+  // In setup(), after loading other preferences:
+  // ... existing code ...
+  preferences.begin(PREF_NAMESPACE, true);
+  useM5StackSmoothing = preferences.getBool(KEY_USE_M5_SMOOTHING, false);
+  useM5StackInterference = preferences.getBool(KEY_USE_M5_INTERFERENCE, false);
+  preferences.end();
+
+  // After all initialization is complete (at the end of setup()):
+  logMessage("Setup complete.");
+  logMessage("Ready for operation.");
 }
 
 void loop() {
@@ -1583,8 +1518,18 @@ void displayLogOnOLED() {
 
   // Display NMEA stats 
   display.setCursor(0, 44); // Adjusted Y position
-  display.print("NMEA OK=");
-  display.print(gps.passedChecksum());
+
+  // Calculate packets per second
+  unsigned long currentPackets = gps.passedChecksum();
+  unsigned long currentTime = millis();
+  if (currentTime - lastPacketTime >= 1000) { // Update rate every second
+      packetsPerSecond = (currentPackets - lastPacketCount) * 1000.0f / (currentTime - lastPacketTime);
+      lastPacketCount = currentPackets;
+      lastPacketTime = currentTime;
+  }
+
+  display.print("Pkt/s ");
+  display.print(packetsPerSecond, 1);
   display.print(" Err=");
   display.println(gps.failedChecksum());
 
