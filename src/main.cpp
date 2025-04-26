@@ -87,6 +87,7 @@ void displayLogOnOLED();
 void displayCompassLogOnOLED();
 void displayGraphicCompass();
 void displayWorldMap();
+void displayLogMessages();
 void calculateAndApplyCalibration(); // New calibration function
 void setDeclinationFromGPS(float lat, float lng); // Auto declination based on GPS position
 void applyPrivacyFilter(); // Stub - Replaced by getLatitude() and getLongitude() wrappers
@@ -163,7 +164,7 @@ std::vector<String> log_buffer; // Historical log buffer
 // bool show_log_on_oled = false; // Replaced by currentDisplayMode
 
 // Display Modes Enum
-enum class DisplayMode { GPS_STATUS, COMPASS_STATUS, GRAPHIC_COMPASS, WORLD_MAP };
+enum class DisplayMode { GPS_STATUS, COMPASS_STATUS, GRAPHIC_COMPASS, WORLD_MAP, LOG_DISPLAY };
 DisplayMode currentDisplayMode = DisplayMode::GRAPHIC_COMPASS; // Start in graphic compass mode
 
 // Variables to hold latest status for fixed display
@@ -217,11 +218,22 @@ const char* KEY_USE_M5_INTERFERENCE = "useM5Interf";  // Key for M5Stack interfe
 // Logging function - sends to Host serial and adds to buffer
 void logMessage(const String& msg) {
   Host.println(msg); // Keep sending to serial
-  // Add message to buffer, managing size
-  if (log_buffer.size() >= MAX_LOG_LINES) {
-    log_buffer.erase(log_buffer.begin()); // Remove the oldest message
+  
+  // Only add to buffer if it's an error, warning, or failure message
+  if (msg.startsWith("ERROR") || 
+      msg.startsWith("***") || 
+      msg.startsWith("WARNING") ||
+      msg.startsWith("Failed") ||
+      msg.startsWith("Error") ||
+      msg.startsWith("!") ||
+      msg.startsWith("Warning")) {
+    
+    // Add message to buffer, managing size
+    if (log_buffer.size() >= MAX_LOG_LINES) {
+      log_buffer.erase(log_buffer.begin()); // Remove the oldest message
+    }
+    log_buffer.push_back(msg); // Add the new message
   }
-  log_buffer.push_back(msg); // Add the new message
 }
 
 // Set the declination based on compass direction relative to true north from GPS
@@ -359,7 +371,8 @@ enum class UIState {
   CALIBRATION_MODE_SELECTION,
   CALIBRATING_COMPASS,
   SETTING_DECLINATION,
-  SETTING_INVERSION
+  SETTING_INVERSION,
+  LOG_DISPLAY
 };
 
 // Current UI state
@@ -403,6 +416,9 @@ UIState determineCurrentUIState() {
       case DisplayMode::WORLD_MAP:
         detectedState = UIState::WORLD_MAP_SCREEN;
         break;
+      case DisplayMode::LOG_DISPLAY:
+        detectedState = UIState::LOG_DISPLAY;
+        break;
       default:
         detectedState = UIState::GRAPHIC_COMPASS_SCREEN;
         break;
@@ -431,6 +447,8 @@ void handleShortPressDeclination();
 void handleLongPressDeclination();
 void handleShortPressInversion();
 void handleLongPressInversion();
+void handleShortPressLogDisplay();
+void handleLongPressLogDisplay();
 
 // Function prototypes
 void scanI2CDevices();
@@ -455,6 +473,11 @@ bool gpsInitialized = false;  // Track if GPS was successfully initialized
 static unsigned long lastPacketCount = 0;
 static unsigned long lastPacketTime = 0;
 static float packetsPerSecond = 0.0f;
+
+
+// Add these variables near the other global variables
+static int currentLogIndex = 0;  // Index of the current message being displayed
+static const int MESSAGES_PER_PAGE = 1; // Show one message at a time
 
 void setup() {
   // Initialize M5 hardware with minimal configuration
@@ -524,7 +547,7 @@ void setup() {
              // logMessage("    -> Command sent successfully."); 
         } else {
             // This case likely won't happen unless sendUbxCommand fails, but good practice
-            logMessage("    -> ERROR: Failed to *send* enable command for " + String(msgNames[i]));
+            logMessage("ERROR: Failed to *send* enable command for " + String(msgNames[i]));
             anyNmeaFail = true; 
         }
         delay(GPS_CONFIG_RETRY_DELAY / 2); 
@@ -616,6 +639,7 @@ void setup() {
   buttonHandlerMap[UIState::CALIBRATING_COMPASS] = ButtonHandlers{handleShortPressCalibrating, handleLongPressCalibrating};
   buttonHandlerMap[UIState::SETTING_DECLINATION] = ButtonHandlers{handleShortPressDeclination, handleLongPressDeclination};
   buttonHandlerMap[UIState::SETTING_INVERSION] = ButtonHandlers{handleShortPressInversion, handleLongPressInversion};
+  buttonHandlerMap[UIState::LOG_DISPLAY] = ButtonHandlers{handleShortPressLogDisplay, handleLongPressLogDisplay};
   
   
   // Initialize display
@@ -812,12 +836,11 @@ void loop() {
     activeCompass->read();
   }
 
-    // Process any available GPS data
+  // Process any available GPS data
   if (gpsInitialized) {
     while (GPS.available()) {
       gps.encode(GPS.read());
     }
-    // No need to call applyPrivacyFilter anymore - the wrapper functions handle this
   }
 
   // Basic display update
@@ -834,6 +857,9 @@ void loop() {
         break;
       case DisplayMode::WORLD_MAP:
         displayWorldMap();
+        break;
+      case DisplayMode::LOG_DISPLAY:
+        displayLogMessages();
         break;
     }
   }
@@ -913,8 +939,6 @@ void handleLongPressWorldMap() {
   // Toggle privacy mode
   privacyModeEnabled = !privacyModeEnabled;
   logMessage("Privacy mode " + String(privacyModeEnabled ? "enabled" : "disabled"));
-  
-  // No need to call applyPrivacyFilter anymore since we're using the wrapper functions
   
   // Force redraw of the world map to show/hide privacy indicator
   displayWorldMap();
@@ -1409,8 +1433,8 @@ void displayCompassLogOnOLED() {
 }
 void handleShortPressCompassStatus() {
   // Switch to next screen
-  currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
-  logMessage("Display mode changed to: GRAPHIC_COMPASS");
+  currentDisplayMode = DisplayMode::LOG_DISPLAY;
+  logMessage("Display mode changed to: LOG_DISPLAY");
 }
 void handleLongPressCompassStatus() {
   // Start calibration mode selection
@@ -1737,6 +1761,126 @@ void scanI2CDevices() {
   if (nDevices == 0) {
     logMessage("No I2C devices found");
   }
+}
+
+void displayLogMessages() {
+  if (!display_initialized) return;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Center the title
+  String title = "--- Error Log ---";
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 0);
+  display.println(title);
+
+  // Handle empty log buffer
+  if (log_buffer.empty()) {
+    display.setCursor(0, 20);
+    display.println("No Errors");
+    display.setCursor(0, SCREEN_HEIGHT - 8);
+    display.print("Click: Next Screen");
+    display.display();
+    return;
+  }
+
+  // Ensure current index is valid
+  if (currentLogIndex >= log_buffer.size()) {
+    currentLogIndex = log_buffer.size() - 1;
+  }
+  if (currentLogIndex < 0) {
+    currentLogIndex = 0;
+  }
+
+  // Display the current message
+  if (!log_buffer.empty()) {
+    // Calculate which message to show (most recent first)
+    int displayIndex = log_buffer.size() - 1 - currentLogIndex;
+    
+    // Display the message with word wrapping
+    String message = log_buffer[displayIndex];
+    int yPos = 12; // Start below the title
+    int maxWidth = SCREEN_WIDTH - 2; // Leave small margin
+    
+    // Set text color to inverse for all messages (since they're all errors/warnings)
+    display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    
+    // Split message into words and wrap
+    int currentX = 0;
+    String currentLine = "";
+    
+    for (int i = 0; i < message.length(); i++) {
+      char c = message[i];
+      currentLine += c;
+      display.getTextBounds(currentLine, 0, 0, &x1, &y1, &w, &h);
+      
+      if (w > maxWidth || c == '\n') {
+        // Print the line (excluding the last character that caused overflow)
+        if (c == '\n') {
+          display.setCursor(0, yPos);
+          display.println(currentLine.substring(0, currentLine.length() - 1));
+        } else {
+          display.setCursor(0, yPos);
+          display.println(currentLine.substring(0, currentLine.length() - 1));
+          i--; // Back up one character to process it in the next line
+        }
+        yPos += 8; // Move to next line
+        currentLine = "";
+      }
+    }
+    
+    // Print any remaining text
+    if (currentLine.length() > 0) {
+      display.setCursor(0, yPos);
+      display.println(currentLine);
+    }
+  }
+
+  // Show navigation info at bottom
+  display.setTextColor(SSD1306_WHITE); // Reset to normal text color
+  display.setCursor(0, SCREEN_HEIGHT - 16);
+  display.print("Error ");
+  display.print(currentLogIndex + 1);
+  display.print("/");
+  display.print(log_buffer.size());
+  
+  display.setCursor(0, SCREEN_HEIGHT - 8);
+  display.print("Click: Cycle  Hold: Next Screen");
+
+  display.display();
+}
+
+void handleShortPressLogDisplay() {
+  // If no errors, go to next screen immediately
+  if (log_buffer.empty()) {
+    currentDisplayMode = DisplayMode::GPS_STATUS;
+    logMessage("Display mode changed to: GPS_STATUS");
+    return;
+  }
+  
+  // Navigate to next older message
+  if (!log_buffer.empty()) {
+    currentLogIndex = (currentLogIndex + 1) % log_buffer.size();
+    logMessage("Viewing error " + String(currentLogIndex + 1) + " of " + String(log_buffer.size()));
+  }
+}
+
+void handleLongPressLogDisplay() {
+    // Switch to next screen
+  currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
+  logMessage("Display mode changed to: GRAPHIC_COMPASS");
+
+}
+
+// Add this function to handle entering the log display mode
+void enterLogDisplayMode() {
+  currentLogIndex = 0; // Reset to most recent message
+  currentDisplayMode = DisplayMode::LOG_DISPLAY;
+  displayLogMessages();
 }
 
 
