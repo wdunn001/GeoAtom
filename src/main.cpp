@@ -8,7 +8,6 @@
 #include <Preferences.h>
 #include "GPS_Configurator.h"
 #include <map> // Add for std::map
-
 // Include SSD1306 display libraries
 #include <Wire.h>
 #include <Adafruit_GFX.h>
@@ -83,8 +82,6 @@ static const unsigned char world_map[] PROGMEM = {
 	0x00, 0x00, 0x00, 0x00
 };
 
-// Forward declarations for custom functions
-void updateDisplay(float lat, float lng, float alt, int heading);
 void scanI2CDevices(void);
 void displayLogOnOLED();
 void displayCompassLogOnOLED();
@@ -275,19 +272,6 @@ void setDeclinationFromGPS(float lat, float lng) {
   }
 }
 
-// Add these declarations with other global variables
-float smoothedHeading = 0.0f;  // Smoothed compass heading
-float ALPHA = 0.0f;     // Smoothing factor (0.0-1.0): lower = more smoothing, higher = more responsive
-// Compass raw value smoothing
-int smoothedCompassX = 0;      // Smoothed compass X value
-int smoothedCompassY = 0;      // Smoothed compass Y value 
-int smoothedCompassZ = 0;      // Smoothed compass Z value
-float COMPASS_XYZ_ALPHA = 0.0f; // Smoothing factor for raw compass values
-bool compassValuesInitialized = false; // Flag to initialize compass values
-bool compassStabilized = false; // Flag to indicate compass has stabilized after startup
-unsigned long compassStartupTime = 0; // Timestamp when compass initialization started
-const unsigned long COMPASS_STABILIZATION_TIME = 3000; // Wait 3 seconds for compass to stabilize
-
 // Wrapper functions for GPS coordinates that apply privacy mask when needed
 float getLatitude() {
   if (!gps.location.isValid()) {
@@ -359,11 +343,6 @@ float getLongitude() {
   
   // No privacy mode - return raw value
   return rawLng;
-}
-
-// Function to apply privacy filter to GPS coordinates
-void applyPrivacyFilter() {
-  // Function no longer needed - replaced by getLatitude() and getLongitude() wrappers
 }
 
 // UI State Management - Centralized Button Handling
@@ -453,56 +432,7 @@ void handleLongPressDeclination();
 void handleShortPressInversion();
 void handleLongPressInversion();
 
-// Before the loop() function, add a new debugging variable to diagnose compass issues
-bool enableCompassDebug = true;   // Set to true to output detailed compass diagnostics
-unsigned long lastCompassDebugOutput = 0; // Timestamp for last compass debug output
-
-// Compass interference mitigation
-// Configuration flags - set custom ones to false by default
-bool enableOutlierRejection = false;      // Reject sudden large jumps in heading (DEFAULT OFF)
-bool enableNoiseThreshold = false;        // Ignore small changes below threshold (DEFAULT OFF)
-bool enableGpsFusion = false;             // Blend GPS course when moving (DEFAULT OFF)
-bool enableMagneticInterference = false;  // Detect and compensate for interference (DEFAULT OFF)
-
-// Constants for interference mitigation
-int MAX_HEADING_JUMP = 0;           // Maximum allowed heading change in degrees per reading
-int HEADING_NOISE_THRESHOLD = 0;    // Degrees - changes smaller than this are ignored
-float MIN_GPS_CONFIDENCE = 0.0;     // Minimum confidence to start using GPS course
-float MAGNETIC_VARIANCE_THRESHOLD = 0.0; // Threshold for magnetic field variance indicating interference
-
-// Runtime variables for interference detection
-bool lastHeadingValid = false;             // Flag for first reading
-bool highInterferenceDetected = false;     // Current interference status
-bool usingGpsCourse = false;               // Whether GPS course is currently being used
-bool fastTurningDetected = false;          // Flag for fast turning detection
-float turningRate = 0.0f;                  // Detected turning rate in degrees per second
-
-// Keys for storing interference mitigation settings
-const char* KEY_OUTLIER_REJECTION = "outRej";
-const char* KEY_NOISE_THRESHOLD = "noiseThresh";
-const char* KEY_GPS_FUSION = "gpsFusion";
-const char* KEY_MAG_INTERFERENCE = "magInt";
-
-// GPS smoothing variables
-float smoothedGpsSpeed = 0.0f;   // Smoothed GPS speed in km/h
-float smoothedGpsCourse = 0.0f;  // Smoothed GPS course in degrees
-const float GPS_SPEED_ALPHA = 0.2f;   // GPS speed smoothing factor
-const float GPS_COURSE_ALPHA_MIN = 0.05f; // Course smoothing at low speeds
-const float GPS_COURSE_ALPHA_MAX = 0.3f;  // Course smoothing at high speeds
-const float GPS_SPEED_MIN = 3.0f;  // Minimum speed in km/h to consider course reliable
-const float GPS_SPEED_MAX = 20.0f; // Speed at which to use max course alpha
-
-// Update timing constants for optimal performance
-const unsigned long COMPASS_SAMPLE_INTERVAL = 10;   // Sample compass at 100Hz (10ms)
-const unsigned long DISPLAY_UPDATE_INTERVAL = 33;   // Update display at 30Hz (33ms)
-
 // Function prototypes
-void handleShortPressGPSStatus();
-void handleLongPressGPSStatus();
-void handleShortPressCompassStatus();
-void handleLongPressCompassStatus();
-void handleShortPressGraphicCompass();
-void handleLongPressGraphicCompass();
 void scanI2CDevices();
 
 // Define a type for button handler functions for clarity
@@ -518,9 +448,7 @@ struct ButtonHandlers {
 std::map<UIState, ButtonHandlers> buttonHandlerMap;
 
 // Add these declarations near the top with other variables
-const unsigned long GPS_INIT_TIMEOUT = 5000;  // 5 second timeout for GPS init
 const unsigned long GPS_CONFIG_RETRY_DELAY = 100; // 100ms between retries
-const uint8_t MAX_GPS_INIT_RETRIES = 3;  // Maximum number of initialization attempts
 bool gpsInitialized = false;  // Track if GPS was successfully initialized
 
 // Add these variables near the top with other global variables
@@ -555,98 +483,81 @@ void setup() {
   Host.begin(4800, SERIAL_8N1, HOST_RX, HOST_TX);
   logMessage("System initializing...");
 
-  // --- Initialize GPS with Configuration --- 
+    // --- Initialize GPS with Configuration --- 
   logMessage("Initializing GPS module...");
-   // Initialize GPS with validation and retry logic
-  logMessage("Initializing GPS module...");
-  gpsBaudRate = 115200;  // Start with default baud rate
-  
+  gpsBaudRate = 115200; // Start with default baud rate
   bool gpsInitSuccess = false; // **** THIS IS THE ONLY DECLARATION ****
-  uint8_t initAttempts = 0;
- 
-  while (!gpsInitSuccess && initAttempts < MAX_GPS_INIT_RETRIES) {
-    initAttempts++;
-    logMessage("GPS init attempt " + String(initAttempts) + " of " + String(MAX_GPS_INIT_RETRIES));
-    
-    // Initialize GPS serial
-    GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
-    
-    // Wait for GPS to be ready
-    unsigned long startTime = millis();
-    bool receivedData = false;
-    
-    while (millis() - startTime < GPS_INIT_TIMEOUT) {
-      if (GPS.available()) {
-        receivedData = true;
-        break;
-      }
-      delay(10);
+
+  // Basic GPS serial start needed before configuration
+  GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
+  delay(100); // Small delay for serial port
+
+  if (GPS) { // Check if serial port opened successfully
+    logMessage("GPS Serial Port OK. Configuring NMEA...");
+    GPSConfigurator gpsConfig(GPS);  // Changed from GPSConfigurator to GPSConfigurator
+    // bool configSuccess = true; // Local variable, not needed for this logic flow
+
+    // Set update rate to 10Hz
+    if (!gpsConfig.setUpdateRateHz(1)) {
+      logMessage("Failed to set GPS update rate (continuing)");
     }
-    
-    if (!receivedData) {
-      logMessage("No response from GPS, retrying...");
-      GPS.end();
-      delay(GPS_CONFIG_RETRY_DELAY);
-      continue;
-    }
-    
-    // Configure GPS
-    GPSConfigurator gpsConfig(GPS);
-    bool configSuccess = true;  // Track if all configuration steps succeed
-    
-    
+    delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
+
     // Set dynamic model to Portable (0)
     if (!gpsConfig.setDynamicModel(0)) {
-      logMessage("Failed to set GPS dynamic model");
-      configSuccess = false;
+      logMessage("Failed to set GPS dynamic model (continuing)");
     }
-    
-    // Enable essential NMEA messages
-    if (!gpsConfig.enableNmeaMessage(0xF0, 0x00, true) ||  // GGA - Fix data
-        !gpsConfig.enableNmeaMessage(0xF0, 0x04, true) ||  // RMC - Recommended minimum data
-        !gpsConfig.enableNmeaMessage(0xF0, 0x05, true) ||  // VTG - Vector track and speed
-        !gpsConfig.enableNmeaMessage(0xF0, 0x02, true) ||  // GSA - DOP and active satellites
-        !gpsConfig.enableNmeaMessage(0xF0, 0x03, true) ||  // GSV - Satellites in view
-        !gpsConfig.enableNmeaMessage(0xF0, 0x01, true)) {  // GLL - Geographic position
-      logMessage("Failed to configure NMEA messages");
-      configSuccess = false;
+    delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
+
+    // Enable essential NMEA messages (GGA, RMC, VTG, GSA, GSV, GLL)
+    logMessage("Attempting to enable NMEA Messages...");
+    const uint8_t nmeaClass = 0xF0;
+    const uint8_t msgIds[] = {0x00, 0x04, 0x05, 0x02, 0x03, 0x01};
+    const char* msgNames[] = {"GGA", "RMC", "VTG", "GSA", "GSV", "GLL"};
+    bool anyNmeaFail = false;
+
+    for (size_t i = 0; i < sizeof(msgIds) / sizeof(msgIds[0]); ++i) {
+        logMessage("  Sending enable command for: " + String(msgNames[i]) + "...");
+        // enableNmeaMessage sends the command but doesn't wait for ACK/NACK
+        if (gpsConfig.enableNmeaMessage(nmeaClass, msgIds[i], true)) {
+             // We can only confirm the command was *sent*
+             // logMessage("    -> Command sent successfully."); 
+        } else {
+            // This case likely won't happen unless sendUbxCommand fails, but good practice
+            logMessage("    -> ERROR: Failed to *send* enable command for " + String(msgNames[i]));
+            anyNmeaFail = true; 
+        }
+        delay(GPS_CONFIG_RETRY_DELAY / 2); 
     }
-    
-    // Save configuration if all steps succeeded
-    if (configSuccess) {
-      if (gpsConfig.saveConfiguration()) {
-        logMessage("GPS configuration saved successfully");
-        gpsInitSuccess = true;
-        break;
-      } else {
-        logMessage("Failed to save GPS configuration");
-      }
+
+    if (anyNmeaFail) {
+        logMessage("Warning: Failed to *send* one or more NMEA enable commands.");
+    } else {
+        logMessage("All NMEA enable commands sent successfully.");
+        // Note: This doesn't guarantee the GPS *accepted* all commands.
     }
-    
-    // If we get here, configuration failed
-    GPS.end();
-    delay(GPS_CONFIG_RETRY_DELAY);
-  }
-  
-  if (gpsInitSuccess) {
-    gpsInitialized = true;
-    logMessage("GPS initialized successfully");
-    logMessage("GPS Configuration:");
-    logMessage("- Baud Rate: " + String(gpsBaudRate));
-    logMessage("- Update Rate: 10Hz");
-    logMessage("- Dynamic Model: Portable");
-    logMessage("- NMEA Messages: GGA, RMC, VTG, GSA, GSV, GLL");
-    logMessage("  * GGA: Fix data (time, position, fix type)");
-    logMessage("  * RMC: Recommended minimum (pos, vel, time)");
-    logMessage("  * VTG: Vector track and ground speed");
-    logMessage("  * GSA: DOP and active satellites");
-    logMessage("  * GSV: Satellites in view");
-    logMessage("  * GLL: Geographic position");
+
+    logMessage("Attempting to save GPS configuration...");
+    if (gpsConfig.saveConfiguration()) {
+      logMessage("GPS configuration save command sent.");
+      gpsInitSuccess = true; // Assign value to the single variable
+    } else {
+      logMessage("Failed to send save GPS configuration command.");
+      // Keep gpsInitSuccess as false if save fails
+    }
+
   } else {
-    logMessage("*** WARNING: GPS initialization failed after " + String(MAX_GPS_INIT_RETRIES) + " attempts ***");
-    logMessage("System will continue but GPS functionality may be limited");
+    logMessage("*** ERROR: Failed to open GPS Serial Port! ***");
+    gpsInitSuccess = false; // Assign value to the single variable
   }
 
+  gpsInitialized = gpsInitSuccess; // Use the single variable here
+  if (gpsInitialized) {
+      logMessage("GPS initialization sequence complete (check logs for details).");
+  } else {
+      logMessage("*** WARNING: GPS initialization sequence failed or incomplete. ***");
+  }
+  // --- End GPS Initialization ---
 
   // Try to initialize compass
   if (qmcCompass.begin()) {
@@ -665,19 +576,7 @@ void setup() {
   // Load M5Stack settings, default to true if not found
   useM5StackSmoothing = preferences.getBool(KEY_USE_M5_SMOOTHING, true);
   useM5StackInterference = preferences.getBool(KEY_USE_M5_INTERFERENCE, true);
-  
-  // Keep custom features disabled (defaults to false)
-  enableOutlierRejection = preferences.getBool(KEY_OUTLIER_REJECTION, false);
-  enableNoiseThreshold = preferences.getBool(KEY_NOISE_THRESHOLD, false);
-  enableGpsFusion = preferences.getBool(KEY_GPS_FUSION, false);
-  enableMagneticInterference = preferences.getBool(KEY_MAG_INTERFERENCE, false);
-
-  // Load related thresholds/parameters (these can still be loaded even if algo is off)
-  MAX_HEADING_JUMP = preferences.getInt("maxHeadingJump", 0);
-  HEADING_NOISE_THRESHOLD = preferences.getInt("headingNoiseThresh", 0);
-  MAGNETIC_VARIANCE_THRESHOLD = preferences.getFloat("magVarThresh", 0.0f);
-  ALPHA = preferences.getFloat("compassAlpha", 0.0f);
-  COMPASS_XYZ_ALPHA = preferences.getFloat("compassXYZAlpha", 0.0f);
+ 
   
   // Load other settings (declination, inversion, etc.)
   compassInverted = preferences.getBool(KEY_COMPASS_INVERTED, false);
@@ -686,7 +585,6 @@ void setup() {
       currentDeclination = preferences.getFloat(KEY_DECLINATION, 0.0f);
       hmcCompass.setDeclination(currentDeclination);
   }
-  // Note: We don't load calibration here in the simplified setup
 
   preferences.end();
 
@@ -719,25 +617,6 @@ void setup() {
   buttonHandlerMap[UIState::SETTING_DECLINATION] = ButtonHandlers{handleShortPressDeclination, handleLongPressDeclination};
   buttonHandlerMap[UIState::SETTING_INVERSION] = ButtonHandlers{handleShortPressInversion, handleLongPressInversion};
   
-  // Initialize preferences
-  preferences.begin(PREF_NAMESPACE, true); // Open read-only
-  
-  // Load interference mitigation settings - initialize all to false
-  enableOutlierRejection = false;
-  enableNoiseThreshold = false;
-  enableGpsFusion = false;
-  enableMagneticInterference = false;
-  
-  // Load interference thresholds but keep algorithms disabled
-  MAX_HEADING_JUMP = preferences.getInt("maxHeadingJump", 0);
-  HEADING_NOISE_THRESHOLD = preferences.getInt("headingNoiseThresh", 0);
-  MAGNETIC_VARIANCE_THRESHOLD = preferences.getFloat("magVarThresh", 0.0f);
-  
-  // Load smoothing parameters but keep algorithms disabled
-  ALPHA = preferences.getFloat("compassAlpha", 0.0f);
-  COMPASS_XYZ_ALPHA = preferences.getFloat("compassXYZAlpha", 0.0f);
-  
-  preferences.end();
   
   // Initialize display
   logMessage("Initializing display...");
@@ -847,9 +726,7 @@ void setup() {
   if (activeCompass) {
     // Read raw heading directly from compass (avoid smoothing during initial read)
     int initialHeading = activeCompass->getAzimuth();
-    
-    // Initialize smoothed heading to actual compass heading (not 0)
-    smoothedHeading = initialHeading;
+
     
     // Log initial compass heading
     char dirStr[4];
@@ -898,13 +775,6 @@ void setup() {
     displayGraphicCompass();  // Show initial compass display
   }
 
-  // In setup(), after loading other preferences:
-  // ... existing code ...
-  preferences.begin(PREF_NAMESPACE, true);
-  useM5StackSmoothing = preferences.getBool(KEY_USE_M5_SMOOTHING, false);
-  useM5StackInterference = preferences.getBool(KEY_USE_M5_INTERFERENCE, false);
-  preferences.end();
-
   // After all initialization is complete (at the end of setup()):
   logMessage("Setup complete.");
   logMessage("Ready for operation.");
@@ -942,7 +812,7 @@ void loop() {
     activeCompass->read();
   }
 
-  // Process any available GPS data
+    // Process any available GPS data
   if (gpsInitialized) {
     while (GPS.available()) {
       gps.encode(GPS.read());
@@ -970,6 +840,69 @@ void loop() {
 }
 
 // World Map Screen
+void displayWorldMap() {
+  if (!display_initialized) return;
+
+  display.clearDisplay();
+  
+  display.drawBitmap(0, 0, world_map, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  
+  if (gps.location.isValid()) {
+    // Use the wrapper functions that handle privacy mode automatically
+    float lat = getLatitude();
+    float lng = getLongitude();
+    
+    int posX = (int)((lng + 180.0) / 360.0 * SCREEN_WIDTH);
+    
+    if (lat > 85.0) lat = 85.0;
+    if (lat < -85.0) lat = -85.0;
+    
+    float latRad = lat * PI / 180.0;
+    float mercN = log(tan((PI/4) + (latRad/2)));
+    int posY = (int)(SCREEN_HEIGHT/2 - (mercN * SCREEN_HEIGHT / (2*PI)));
+    
+    posX = constrain(posX, 0, SCREEN_WIDTH-1);
+    posY = constrain(posY, 0, SCREEN_HEIGHT-1);
+    
+    if ((millis() / 500) % 2 == 0) {
+      display.fillCircle(posX, posY, 3, SSD1306_WHITE);
+      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
+    } else {
+      display.drawCircle(posX, posY, 3, SSD1306_WHITE);
+      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
+    }
+    
+    if (activeCompass != nullptr) {
+      activeCompass->read();
+      int heading = activeCompass->getAzimuth();
+      
+      if (compassInverted) {
+        heading = (heading + 180) % 360;
+      }
+      
+      float radians = heading * PI / 180.0;
+      int arrowLength = 8;
+      int endX = posX + sin(radians) * arrowLength;
+      int endY = posY - cos(radians) * arrowLength;
+      
+      display.drawLine(posX, posY, endX, endY, SSD1306_WHITE);
+    }
+  } else {
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(2, SCREEN_HEIGHT - 8);
+    display.print("No Fix");
+  }
+  
+  // Draw privacy indicator (lock icon) when privacy mode is enabled
+  if (privacyModeEnabled) {
+    drawPrivacyIndicator(display);
+  }
+  
+  display.display();
+}
+ 
+ 
 void handleShortPressWorldMap() {
   // Short press on World Map: Cycle to next display mode
   currentDisplayMode = DisplayMode::GPS_STATUS;
@@ -1070,19 +1003,7 @@ void handleShortPressCalibrating() {
           x_variance /= calibrationPoints;
           y_variance /= calibrationPoints;
           
-          // Set interference parameters based on calibration data
-          enableOutlierRejection = true;
-          enableNoiseThreshold = true;
-          enableMagneticInterference = true;
-          
-          // Calculate thresholds based on variance
-          MAX_HEADING_JUMP = (int)(sqrt(x_variance + y_variance) * 2.0f);
-          HEADING_NOISE_THRESHOLD = (int)(sqrt(x_variance + y_variance) * 0.5f);
-          MAGNETIC_VARIANCE_THRESHOLD = (x_variance + y_variance) * 2.0f;
-          
-          // Set smoothing based on noise characteristics
-          ALPHA = 0.2f; // Moderate smoothing
-          COMPASS_XYZ_ALPHA = 0.2f;
+
           
           // Save to NVM based on compass type
           preferences.begin(PREF_NAMESPACE, false);
@@ -1124,16 +1045,7 @@ void handleShortPressCalibrating() {
             preferences.putFloat(KEY_Y_SCALE, y_scale);
             preferences.putFloat(KEY_Z_SCALE, z_scale);
             
-            // Save interference mitigation settings
-            preferences.putBool(KEY_OUTLIER_REJECTION, enableOutlierRejection);
-            preferences.putBool(KEY_NOISE_THRESHOLD, enableNoiseThreshold);
-            preferences.putBool(KEY_GPS_FUSION, enableGpsFusion);
-            preferences.putBool(KEY_MAG_INTERFERENCE, enableMagneticInterference);
-            preferences.putInt("maxHeadingJump", MAX_HEADING_JUMP);
-            preferences.putInt("headingNoiseThresh", HEADING_NOISE_THRESHOLD);
-            preferences.putFloat("magVarThresh", MAGNETIC_VARIANCE_THRESHOLD);
-            preferences.putFloat("compassAlpha", ALPHA);
-            preferences.putFloat("compassXYZAlpha", COMPASS_XYZ_ALPHA);
+
             
             logMessage("QMC5883L calibration and interference settings saved.");
           } 
@@ -1172,17 +1084,6 @@ void handleShortPressCalibrating() {
             preferences.putFloat(KEY_HMC_Y_SCALE, y_scale);
             preferences.putFloat(KEY_HMC_Z_SCALE, z_scale);
             
-            // Save interference mitigation settings
-            preferences.putBool(KEY_OUTLIER_REJECTION, enableOutlierRejection);
-            preferences.putBool(KEY_NOISE_THRESHOLD, enableNoiseThreshold);
-            preferences.putBool(KEY_GPS_FUSION, enableGpsFusion);
-            preferences.putBool(KEY_MAG_INTERFERENCE, enableMagneticInterference);
-            preferences.putInt("maxHeadingJump", MAX_HEADING_JUMP);
-            preferences.putInt("headingNoiseThresh", HEADING_NOISE_THRESHOLD);
-            preferences.putFloat("magVarThresh", MAGNETIC_VARIANCE_THRESHOLD);
-            preferences.putFloat("compassAlpha", ALPHA);
-            preferences.putFloat("compassXYZAlpha", COMPASS_XYZ_ALPHA);
-            
             logMessage("HMC5883L calibration and interference settings saved.");
           }
           preferences.end();
@@ -1193,18 +1094,9 @@ void handleShortPressCalibrating() {
           
           // Move to inversion setting
           isSettingInversion = true;
-          
-          // Log the applied interference settings
+        
           logMessage("Applied interference settings: ");
-          logMessage(" - Outlier rejection: " + String(enableOutlierRejection ? "ON" : "OFF"));
-          logMessage(" - Noise threshold: " + String(enableNoiseThreshold ? "ON" : "OFF"));
-          logMessage(" - GPS fusion: " + String(enableGpsFusion ? "ON" : "OFF"));
-          logMessage(" - Magnetic interference: " + String(enableMagneticInterference ? "ON" : "OFF"));
-          logMessage(" - Max heading jump: " + String(MAX_HEADING_JUMP) + " degrees");
-          logMessage(" - Noise threshold: " + String(HEADING_NOISE_THRESHOLD) + " degrees");
-          logMessage(" - Magnetic variance threshold: " + String(MAGNETIC_VARIANCE_THRESHOLD));
-          logMessage(" - Compass smoothing alpha: " + String(ALPHA, 2));
-          logMessage(" - Compass XYZ smoothing alpha: " + String(COMPASS_XYZ_ALPHA, 2));
+ 
         } else {
           logMessage("Calibration calculation failed. Try again.");
           isCalibrating = false;
@@ -1267,7 +1159,6 @@ void handleLongPressDeclination() {
   isSettingDeclination = false;
   logMessage("Declination setting cancelled");
 }
-
 // Setting Inversion
 void handleShortPressInversion() {
   // Short press in inversion setting: Set normal mode
@@ -1288,7 +1179,6 @@ void handleShortPressInversion() {
     logMessage("Point to TRUE NORTH, then click the button.");
   }
 }
-
 void handleLongPressInversion() {
   // Long press in inversion setting: Set inverted mode
   compassInverted = true;
@@ -1300,261 +1190,6 @@ void handleLongPressInversion() {
   
   logMessage("Compass display set to inverted mode");
   isSettingInversion = false;
-}
-
-// Button handler implementations
-void handleShortPressGPSStatus() {
-  // Switch to next screen
-  currentDisplayMode = DisplayMode::COMPASS_STATUS;
-  logMessage("Display mode changed to: COMPASS_STATUS");
-}
-
-void handleLongPressGPSStatus() {
-  // Toggle privacy mode
-  privacyModeEnabled = !privacyModeEnabled;
-  preferences.putBool(KEY_COMPASS_INVERTED, privacyModeEnabled);
-  
-  // Immediately apply privacy filter to update displayed coordinates
-  if (gps.location.isValid()) {
-    applyPrivacyFilter();
-  }
-  
-  // Clearly log that this is GPS coordinate privacy
-  if (privacyModeEnabled) {
-    logMessage("GPS PRIVACY MODE ENABLED - Coordinates will be masked");
-  } else {
-    logMessage("GPS PRIVACY MODE DISABLED - Showing actual coordinates");
-  }
-}
-
-void handleShortPressCompassStatus() {
-  // Switch to next screen
-  currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
-  logMessage("Display mode changed to: GRAPHIC_COMPASS");
-}
-
-void handleLongPressCompassStatus() {
-  // Start calibration mode selection
-  if (activeCompass == &qmcCompass) {
-    isSelectingCalibrationMode = true;
-    calibrationModeIndex = 1; // Default to 8-point
-    logMessage("Entering calibration mode selection...");
-  } else if (activeCompass == &hmcCompass) {
-    isSettingDeclination = true;
-    logMessage("Entering declination setting mode...");
-  }
-}
-
-void handleShortPressGraphicCompass() {
-  // Switch to next screen
-  currentDisplayMode = DisplayMode::WORLD_MAP;
-  logMessage("Display mode changed to: WORLD_MAP");
-}
-
-void handleLongPressGraphicCompass() {
-  // Toggle compass inversion
-  compassInverted = !compassInverted;
-  logMessage("Compass display " + String(compassInverted ? "inverted" : "normal"));
-}
-
-void scanI2CDevices() {
-  byte error, address;
-  int nDevices = 0;
-  
-  logMessage("Scanning I2C bus...");
-  
-  for(address = 1; address < 127; address++) {
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
-    
-    if (error == 0) {
-      String msg = "I2C device found at address 0x";
-      if (address < 16) msg += "0";
-      msg += String(address, HEX);
-      logMessage(msg);
-      nDevices++;
-    }
-  }
-  
-  if (nDevices == 0) {
-    logMessage("No I2C devices found");
-  }
-}
-
-// Display function implementations
-void updateDisplay(float lat, float lng, float alt, int heading) {
-  if (!display_initialized) return;
-  
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("GPS Data:");
-  display.println("-------------");
-  
-  // Format and display coordinates
-  display.print("Lat: "); display.println(lat, 6);
-  display.print("Lng: "); display.println(lng, 6);
-  display.print("Alt: "); display.print(alt + altitudeCorrection); display.println("m");
-  
-  // --- Compass Direction and Azimuth --- 
-  char dirArray[4] = {' ', ' ', ' ', '\0'}; // Array to hold direction text (e.g., NNE)
-  
-  if (activeCompass != nullptr) {
-    int displayHeading = heading;
-    // Apply inversion if compass is inverted
-    if (compassInverted) {
-      displayHeading = (heading + 180) % 360;
-    }
-    
-    activeCompass->getDirection(dirArray, displayHeading);
-    
-    display.setCursor(0, 40); // Position for Direction Text
-    display.print(dirArray);
-    
-    display.setCursor(0, 48); // Position for Azimuth value
-    display.print("Az ");
-    display.println(displayHeading);
-    
-    // Show declination if using HMC5883L
-    if (activeCompass == &hmcCompass) {
-      float declDegrees = currentDeclination * 180.0 / PI;
-      display.setCursor(50, 40);
-      display.print("Decl:");
-      display.print(declDegrees, 1);
-    }
-  } else {
-    display.setCursor(0, 40);
-    display.print("No compass");
-    display.setCursor(0, 48);
-    display.print("Az: ---");
-  }
-  
-  // Display satellite count
-  display.setCursor(0, 56);
-  display.print("Sats: ");
-  display.println(gps.satellites.value());
-  
-  display.display();
-}
-
-void displayLogOnOLED() {
-  if (!display_initialized) return;
-
-  // Use static variables to hold the protocol string and its last update time
-  static String displayedGpsProtocol = "Initializing...";
-  static unsigned long lastProtocolUpdate = 0;
-  const unsigned long PROTOCOL_UPDATE_INTERVAL = 5000; // 5 seconds
-
-  display.clearDisplay(); 
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  // Center the title
-  String title = "--- GPS Status ---";
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 0);
-  display.println(title);
-
-  // Update GPS protocol string only every 5 seconds
-  if (millis() - lastProtocolUpdate >= PROTOCOL_UPDATE_INTERVAL) {
-    lastProtocolUpdate = millis();
-    if (gps.charsProcessed() > 0) {
-      String tempProtocol = "";
-      if (gps.location.isUpdated()) tempProtocol += "GGA ";
-      if (gps.date.isUpdated() || gps.time.isUpdated()) tempProtocol += "RMC ";
-      if (gps.course.isUpdated()) tempProtocol += "VTG ";
-      if (gps.satellites.isUpdated()) tempProtocol += "GSV "; // Added check for GSV
-      if (gps.hdop.isValid()) tempProtocol += "GSA "; // Added check for GSA
-      // GLL might not have a direct TinyGPS++ updated flag, assume active if others are
-      if (tempProtocol.length() > 0) tempProtocol += "GLL "; 
-      
-      if (tempProtocol.length() == 0) tempProtocol = "NMEA";
-      displayedGpsProtocol = tempProtocol + String(gpsBaudRate);
-    } else {
-      displayedGpsProtocol = "No GPS data";
-    }
-  }
-  
-  // Display the potentially cached protocol string
-  display.setCursor(0, 10); // Adjusted Y position for better spacing
-  display.println(displayedGpsProtocol);
-  
-  // Display Lat, Lng, and Sat (updated every display cycle)
-  if (gps.location.isValid()) {
-    // Use wrapper functions that handle privacy masking
-    float lat = getLatitude();
-    float lng = getLongitude();
-    
-    display.setCursor(0, 20); // Adjusted Y position
-    display.print("Lat ");
-    display.println(lat, 5);
-    
-    display.setCursor(0, 28); // Adjusted Y position
-    display.print("Lng ");
-    display.println(lng, 5);
-  } else {
-    display.setCursor(0, 20); // Adjusted Y position
-    display.println("Lat No Fix");
-    display.setCursor(0, 28); // Adjusted Y position
-    display.println("Lng No Fix");
-  }
-  
-  // Display satellite count
-  display.setCursor(0, 36); // Adjusted Y position
-  display.print("Sat ");
-  display.println(gps.satellites.value());
-  
-  // Display altitude with correction
-  if (gps.altitude.isValid()) {
-    float correctedAlt = gps.altitude.meters() + altitudeCorrection;
-    display.setCursor(64, 36); // Adjusted X position
-    display.print("Alt ");
-    display.print(correctedAlt, 0);
-    display.println("m");
-  }
-
-  // Display NMEA stats 
-  display.setCursor(0, 44); // Adjusted Y position
-
-  // Calculate packets per second
-  unsigned long currentPackets = gps.passedChecksum();
-  unsigned long currentTime = millis();
-  if (currentTime - lastPacketTime >= 1000) { // Update rate every second
-      packetsPerSecond = (currentPackets - lastPacketCount) * 1000.0f / (currentTime - lastPacketTime);
-      lastPacketCount = currentPackets;
-      lastPacketTime = currentTime;
-  }
-
-  display.print("Pkt/s ");
-  display.print(packetsPerSecond, 1);
-  display.print(" Err=");
-  display.println(gps.failedChecksum());
-
-  // Display course and speed
-  if (gps.course.isValid() && gps.speed.isValid()) {
-    display.setCursor(0, 52); // Adjusted Y position
-    display.print("Course: ");
-    display.print(gps.course.deg());
-    display.println(" deg");
-    
-    display.setCursor(64, 52); // Adjusted X position for speed
-    display.print("Spd: ");
-    float speedKmph = gps.speed.kmph();
-    bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
-    if (!reliableSpeed || speedKmph < 3.0) speedKmph = 0;
-    display.print(speedKmph, 1);
-    // Removed "km/h" to save space
-  }
-
-  // Draw privacy indicator if privacy mode is enabled
-  if (privacyModeEnabled) {
-    drawPrivacyIndicator(display);
-  }
-  
-  display.display();
 }
 
 void displayCompassLogOnOLED() {
@@ -1772,6 +1407,166 @@ void displayCompassLogOnOLED() {
 
   display.display();
 }
+void handleShortPressCompassStatus() {
+  // Switch to next screen
+  currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
+  logMessage("Display mode changed to: GRAPHIC_COMPASS");
+}
+void handleLongPressCompassStatus() {
+  // Start calibration mode selection
+  if (activeCompass == &qmcCompass) {
+    isSelectingCalibrationMode = true;
+    calibrationModeIndex = 1; // Default to 8-point
+    logMessage("Entering calibration mode selection...");
+  } else if (activeCompass == &hmcCompass) {
+    isSettingDeclination = true;
+    logMessage("Entering declination setting mode...");
+  }
+}
+
+void displayLogOnOLED() {
+  if (!display_initialized) return;
+
+  // Use static variables to hold the protocol string and its last update time
+  static String displayedGpsProtocol = "Initializing...";
+  static unsigned long lastProtocolUpdate = 0;
+  const unsigned long PROTOCOL_UPDATE_INTERVAL = 5000; // 5 seconds
+
+  // Add variables for packets and errors per second calculation
+  static unsigned long lastPacketCount = 0;
+  static unsigned long lastPacketTime = 0;
+  static float packetsPerSecond = 0.0f;
+  
+  static unsigned long lastErrorCount = 0;
+  static unsigned long lastErrorTime = 0;
+  static float errorsPerSecond = 0.0f;
+
+  display.clearDisplay(); 
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Center the title
+  String title = "--- GPS Status ---";
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, 0);
+  display.println(title);
+
+  // Update GPS protocol string only every 5 seconds
+  if (millis() - lastProtocolUpdate >= PROTOCOL_UPDATE_INTERVAL) {
+    lastProtocolUpdate = millis();
+    if (gps.charsProcessed() > 0) {
+      String tempProtocol = "";
+      if (gps.location.isUpdated()) tempProtocol += "GGA ";
+      if (gps.date.isUpdated() || gps.time.isUpdated()) tempProtocol += "RMC ";
+      if (gps.course.isUpdated()) tempProtocol += "VTG ";
+      if (gps.satellites.isUpdated()) tempProtocol += "GSV "; // Added check for GSV
+      if (gps.hdop.isValid()) tempProtocol += "GSA "; // Added check for GSA
+      // GLL might not have a direct TinyGPS++ updated flag, assume active if others are
+      if (tempProtocol.length() > 0) tempProtocol += "GLL "; 
+      
+      if (tempProtocol.length() == 0) tempProtocol = "NMEA";
+      displayedGpsProtocol = tempProtocol + String(gpsBaudRate);
+    } else {
+      displayedGpsProtocol = "No GPS data";
+    }
+  }
+  
+  // Display the potentially cached protocol string
+  display.setCursor(0, 10); // Adjusted Y position for better spacing
+  display.println(displayedGpsProtocol);
+  
+  // Display Lat, Lng, and Sat (updated every display cycle)
+  if (gps.location.isValid()) {
+    // Use wrapper functions that handle privacy masking
+    float lat = getLatitude();
+    float lng = getLongitude();
+    
+    display.setCursor(0, 20); // Adjusted Y position
+    display.print("Lat ");
+    display.println(lat, 5);
+    
+    display.setCursor(0, 28); // Adjusted Y position
+    display.print("Lng ");
+    display.println(lng, 5);
+  } else {
+    display.setCursor(0, 20); // Adjusted Y position
+    display.println("Lat No Fix");
+    display.setCursor(0, 28); // Adjusted Y position
+    display.println("Lng No Fix");
+  }
+  
+  // Display satellite count
+  display.setCursor(0, 36); // Adjusted Y position
+  display.print("Sat ");
+  display.println(gps.satellites.value());
+  
+  // Display altitude with correction
+  if (gps.altitude.isValid()) {
+    float correctedAlt = gps.altitude.meters() + altitudeCorrection;
+    display.setCursor(64, 36); // Adjusted X position
+    display.print("Alt ");
+    display.print(correctedAlt, 0);
+    display.println("m");
+  }
+
+  // Display NMEA stats 
+  display.setCursor(0, 44); // Adjusted Y position
+
+  // Calculate packets and errors per second
+  unsigned long currentTime = millis();
+  if (currentTime - lastPacketTime >= 1000) { // Update rate every second
+    unsigned long currentPackets = gps.passedChecksum();
+    unsigned long currentErrors = gps.failedChecksum();
+    
+    packetsPerSecond = (currentPackets - lastPacketCount) * 1000.0f / (currentTime - lastPacketTime);
+    errorsPerSecond = (currentErrors - lastErrorCount) * 1000.0f / (currentTime - lastErrorTime);
+    
+    lastPacketCount = currentPackets;
+    lastErrorCount = currentErrors;
+    lastPacketTime = currentTime;
+    lastErrorTime = currentTime;
+  }
+
+  display.print("Pkt/s ");
+  display.print(packetsPerSecond, 1);
+  display.print(" Err/s ");
+  display.print(errorsPerSecond, 1);
+
+  // Display course and speed
+  if (gps.course.isValid() && gps.speed.isValid()) {
+    display.setCursor(0, 52); // Adjusted Y position
+    display.print("Course: ");
+    display.print(gps.course.deg());
+    display.println(" deg");
+    
+    display.setCursor(64, 52); // Adjusted X position for speed
+    display.print("Spd: ");
+    float speedKmph = gps.speed.kmph();
+    bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
+    if (!reliableSpeed || speedKmph < 3.0) speedKmph = 0;
+    display.print(speedKmph, 1);
+    // Removed "km/h" to save space
+  }
+
+  // Draw privacy indicator if privacy mode is enabled
+  if (privacyModeEnabled) {
+    drawPrivacyIndicator(display);
+  }
+  
+  display.display();
+}
+void handleShortPressGPSStatus() {
+  // Switch to next screen
+  currentDisplayMode = DisplayMode::COMPASS_STATUS;
+  logMessage("Display mode changed to: COMPASS_STATUS");
+}
+void handleLongPressGPSStatus() {
+  // Enter altitude correction mode
+  isSettingAltitudeCorrection = true;
+  logMessage("Entering altitude correction mode...");
+}
 
 void displayGraphicCompass() {
   if (!display_initialized) return;
@@ -1909,67 +1704,43 @@ void displayGraphicCompass() {
 
   display.display();
 }
-
-void displayWorldMap() {
-  if (!display_initialized) return;
-
-  display.clearDisplay();
-  
-  display.drawBitmap(0, 0, world_map, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
-  
-  if (gps.location.isValid()) {
-    // Use the wrapper functions that handle privacy mode automatically
-    float lat = getLatitude();
-    float lng = getLongitude();
-    
-    int posX = (int)((lng + 180.0) / 360.0 * SCREEN_WIDTH);
-    
-    if (lat > 85.0) lat = 85.0;
-    if (lat < -85.0) lat = -85.0;
-    
-    float latRad = lat * PI / 180.0;
-    float mercN = log(tan((PI/4) + (latRad/2)));
-    int posY = (int)(SCREEN_HEIGHT/2 - (mercN * SCREEN_HEIGHT / (2*PI)));
-    
-    posX = constrain(posX, 0, SCREEN_WIDTH-1);
-    posY = constrain(posY, 0, SCREEN_HEIGHT-1);
-    
-    if ((millis() / 500) % 2 == 0) {
-      display.fillCircle(posX, posY, 3, SSD1306_WHITE);
-      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
-    } else {
-      display.drawCircle(posX, posY, 3, SSD1306_WHITE);
-      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
-    }
-    
-    if (activeCompass != nullptr) {
-      activeCompass->read();
-      int heading = activeCompass->getAzimuth();
-      
-      if (compassInverted) {
-        heading = (heading + 180) % 360;
-      }
-      
-      float radians = heading * PI / 180.0;
-      int arrowLength = 8;
-      int endX = posX + sin(radians) * arrowLength;
-      int endY = posY - cos(radians) * arrowLength;
-      
-      display.drawLine(posX, posY, endX, endY, SSD1306_WHITE);
-    }
-  } else {
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(2, SCREEN_HEIGHT - 8);
-    display.print("No Fix");
-  }
-  
-  // Draw privacy indicator (lock icon) when privacy mode is enabled
-  if (privacyModeEnabled) {
-    drawPrivacyIndicator(display);
-  }
-  
-  display.display();
+void handleShortPressGraphicCompass() {
+  // Switch to next screen
+  currentDisplayMode = DisplayMode::WORLD_MAP;
+  logMessage("Display mode changed to: WORLD_MAP");
 }
- 
- 
+void handleLongPressGraphicCompass() {
+  // Toggle compass inversion
+  compassInverted = !compassInverted;
+  logMessage("Compass display " + String(compassInverted ? "inverted" : "normal"));
+}
+
+void scanI2CDevices() {
+  byte error, address;
+  int nDevices = 0;
+  
+  logMessage("Scanning I2C bus...");
+  
+  for(address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+    
+    if (error == 0) {
+      String msg = "I2C device found at address 0x";
+      if (address < 16) msg += "0";
+      msg += String(address, HEX);
+      logMessage(msg);
+      nDevices++;
+    }
+  }
+  
+  if (nDevices == 0) {
+    logMessage("No I2C devices found");
+  }
+}
+
+
+
+
+
+
