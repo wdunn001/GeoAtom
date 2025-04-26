@@ -7,6 +7,7 @@
 #include <String>
 #include <Preferences.h>
 #include "GPS_Configurator.h"
+#include "ICOM7100Configurator.h"  // Add new include
 #include <map> // Add for std::map
 // Include SSD1306 display libraries
 #include <Wire.h>
@@ -215,8 +216,16 @@ const char* KEY_USE_M5_INTERFERENCE = "useM5Interf";  // Key for M5Stack interfe
 #define RADIO_TX 19  // ESP32 TX pin connected to TTL RX
 // --------------------------------------------------------------
 
-// Logging function - sends to Radio serial and adds to buffer
-void logMessage(const String& msg) {// Keep sending to serial
+// Create a global log instance
+m5::Log_Class m5Log;
+
+// Create ICOM7100 configurator instance
+ICOM7100Configurator* radioConfig = nullptr;
+
+// Logging function - adds messages to buffer and sends to M5 log
+void logMessage(const String& msg) {
+  // Log to M5 serial (USB) for debugging
+  m5Log.println(msg.c_str());
   
   // Only add to buffer if it's an error, warning, or failure message
   if (msg.startsWith("ERROR") || 
@@ -480,7 +489,7 @@ static int currentLogIndex = 0;  // Index of the current message being displayed
 static const int MESSAGES_PER_PAGE = 1; // Show one message at a time
 
 void setup() {
-  // Initialize M5 hardware with minimal configuration
+  // Initialize M5 hardware with proper configuration for M5Atom Echo
   auto cfg = M5.config();
   cfg.serial_baudrate = 0;  // Disable M5 serial
   M5.begin(cfg);
@@ -491,6 +500,7 @@ void setup() {
   // Initialize display first
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     // If display fails, we can't show anything
+    logMessage("ERROR: SSD1306 display initialization failed");
     return;
   }
   display_initialized = true;
@@ -501,9 +511,13 @@ void setup() {
   display.println("Starting...");
   display.display();
 
-
-  // Initialize Radio serial for debug
+  // Initialize Radio serial for NMEA data only
   Radio.begin(4800, SERIAL_8N1, RADIO_RX, RADIO_TX);
+  
+  // Initialize ICOM7100 configurator
+  radioConfig = new ICOM7100Configurator(Radio);
+  radioConfig->initialize();
+  
   logMessage("System initializing...");
 
   // --- Initialize GPS with Configuration --- 
@@ -613,8 +627,7 @@ void setup() {
   logMessage("--- Active Settings ---");
   logMessage("M5 Smoothing: " + String(useM5StackSmoothing ? "ON" : "OFF"));
   logMessage("M5 Interference: " + String(useM5StackInterference ? "ON" : "OFF"));
-  logMessage("Custom Smoothing: OFF");
-  logMessage("Custom Interference: OFF");
+
   logMessage("-----------------------");
 
   // Show ready message
@@ -1900,39 +1913,9 @@ void enterLogDisplayMode() {
 
 // Add this function to forward NMEA messages to the Radio
 void forwardNMEAToICOM() {
-  static String nmeaBuffer;
-  static unsigned long lastForwardTime = 0;
-  const unsigned long FORWARD_INTERVAL = 1000; // Forward every second
-
-  if (millis() - lastForwardTime >= FORWARD_INTERVAL) {
-    if (gps.location.isValid()) {
-      // Construct GGA message
-      String ggaMessage = "$GPGGA,";
-      ggaMessage += String(gps.time.hour()) + String(gps.time.minute()) + String(gps.time.second()) + ".00,";
-      ggaMessage += String(abs(gps.location.lat()), 4) + (gps.location.lat() < 0 ? "S," : "N,");
-      ggaMessage += String(abs(gps.location.lng()), 4) + (gps.location.lng() < 0 ? "W," : "E,");
-      ggaMessage += "1,"; // Fix quality
-      ggaMessage += String(gps.satellites.value()) + ",";
-      ggaMessage += String(gps.hdop.hdop(), 1) + ",";
-      ggaMessage += String(gps.altitude.meters() + altitudeCorrection, 1) + ",M,";
-      ggaMessage += "0.0,M,,"; // Geoid separation and age of diff
-
-      // Calculate checksum
-      uint8_t checksum = 0;
-      for (size_t i = 1; i < ggaMessage.length(); i++) {
-        checksum ^= ggaMessage[i];
-      }
-      ggaMessage += "*";
-      if (checksum < 16) ggaMessage += "0";
-      ggaMessage += String(checksum, HEX);
-      ggaMessage += "\r\n";
-
-      // Send to Radio
-      Radio.print(ggaMessage);
-      logMessage("Forwarded GGA to Radio: " + ggaMessage);
+    if (radioConfig != nullptr) {
+        radioConfig->forwardNMEAToRadio(gps, altitudeCorrection);
     }
-    lastForwardTime = millis();
-  }
 }
 
 
