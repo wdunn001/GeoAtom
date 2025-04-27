@@ -229,8 +229,8 @@ const char* KEY_USE_M5_INTERFERENCE = "useM5Interf";  // Key for M5Stack interfe
 #define GPS_TX 33  // ESP32 TX pin connected to BN-880 RX
 
 // TTL to RS232 level converter connections (Optional Radio Output)
-#define RADIO_RX 22  // ESP32 RX pin connected to TTL TX
-#define RADIO_TX 19  // ESP32 TX pin connected to TTL RX
+#define RADIO_RX 19  // ESP32 RX pin connected to TTL TX
+#define RADIO_TX 22  // ESP32 TX pin connected to TTL RX
 // --------------------------------------------------------------
 
 // Create a global log instance
@@ -485,7 +485,7 @@ void handleLongPressRadioSettings();
 void handleDoubleClickRadioSettings();
 // Function prototypes
 void scanI2CDevices();
-void forwardNMEAToICOM();
+void forwardNMEAToICOM(TinyGPSPlus& gps, int altitudeCorrection);
 
 
 // Define a type for button handler functions for clarity
@@ -536,8 +536,9 @@ static bool waitingForDoubleClick = false;
 const unsigned long DOUBLE_CLICK_TIMEOUT = 300; // 300ms to detect double click
 
 // Add this near the top with other global variables
-static unsigned long lastScreenChangeTime = 0;
-const unsigned long SCREEN_CHANGE_DEBOUNCE = 500; // 500ms debounce after screen change
+
+// Add this near the top with other global variables
+static bool ignoreNextRelease = false;
 
 void setup() {
   // Initialize M5 hardware with proper configuration for M5Atom Echo
@@ -578,7 +579,7 @@ void setup() {
   // --- Initialize GPS with Configuration --- 
   logMessage("Initializing GPS module...");
   gpsBaudRate = 115200; // Start with default baud rate
-  bool gpsInitSuccess = false; // **** THIS IS THE ONLY DECLARATION ****
+  bool gpsInitSuccess = false;
 
   // Basic GPS serial start needed before configuration
   GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
@@ -589,7 +590,7 @@ void setup() {
     GPSConfigurator gpsConfig(GPS);
 
     // Set update rate to 1Hz (standard for most GPS receivers)
-    if (!gpsConfig.setUpdateRateHz(1)) {
+    if (!gpsConfig.setUpdateRateHz(10)) {
       logMessage("Failed to set GPS update rate (continuing)");
     }
     delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
@@ -632,7 +633,6 @@ void setup() {
     } else {
       logMessage("Failed to send save GPS configuration command.");
     }
-
   } else {
     logMessage("*** ERROR: Failed to open GPS Serial Port! ***");
     gpsInitSuccess = false;
@@ -879,13 +879,14 @@ void loop() {
   if (M5.BtnA.wasHold()) {
     if (buttonHandlerMap[currentUIState].longPressHandler) {
       buttonHandlerMap[currentUIState].longPressHandler();
-      lastScreenChangeTime = millis(); // Record screen change time
+      ignoreNextRelease = true; // Set flag to ignore next release
     }
     waitingForDoubleClick = false; // Reset double click state
   }
   else if (M5.BtnA.wasReleased()) {
-    // Skip button handling if we're within the debounce period
-    if (millis() - lastScreenChangeTime < SCREEN_CHANGE_DEBOUNCE) {
+    if (ignoreNextRelease) {
+      // Ignore this release and reset the flag
+      ignoreNextRelease = false;
       waitingForDoubleClick = false;
       return;
     }
@@ -908,7 +909,6 @@ void loop() {
     // Timeout reached, treat as single click
     if (buttonHandlerMap[currentUIState].shortPressHandler) {
       buttonHandlerMap[currentUIState].shortPressHandler();
-      lastScreenChangeTime = millis(); // Record screen change time
     }
     waitingForDoubleClick = false;
   }
@@ -930,7 +930,7 @@ void loop() {
     }
     
     // Forward NMEA messages to Radio
-    forwardNMEAToICOM();
+    radioConfig->forwardNMEAToRadio(gps, altitudeCorrection);
   }
 
   // Basic display update
@@ -1998,12 +1998,6 @@ void enterLogDisplayMode() {
   displayLogMessages();
 }
 
-// Add this function to forward NMEA messages to the Radio
-void forwardNMEAToICOM() {
-    if (radioConfig != nullptr) {
-        radioConfig->forwardNMEAToRadio(gps, altitudeCorrection);
-    }
-}
 
 // Add new display function
 void displayRadioSettings() {
@@ -2214,9 +2208,3 @@ void handleLongPressRadioSettings() {
   }
   displayRadioSettings();
 }
-
-
-
-
-
-

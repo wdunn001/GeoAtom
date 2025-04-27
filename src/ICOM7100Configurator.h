@@ -5,6 +5,9 @@
 #include <HardwareSerial.h>
 #include <TinyGPS++.h>
 
+// Forward declare the logMessage function
+void logMessage(const String& msg);
+
 class ICOM7100Configurator {
 private:
     HardwareSerial& radioSerial;
