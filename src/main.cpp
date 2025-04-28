@@ -232,8 +232,8 @@ const char* KEY_USE_M5_INTERFERENCE = "useM5Interf";  // Key for M5Stack interfe
 #define GPS_TX 33  // ESP32 TX pin connected to BN-880 RX
 
 // TTL to RS232 level converter connections (Optional Radio Output)
-#define RADIO_RX 22  // ESP32 RX pin connected to TTL TX
-#define RADIO_TX 19  // ESP32 TX pin connected to TTL RX
+#define RADIO_RX 19  // ESP32 RX pin connected to TTL TX
+#define RADIO_TX 22  // ESP32 TX pin connected to TTL RX
 // --------------------------------------------------------------
 
 // Create a global log instance
@@ -2051,7 +2051,6 @@ void handleShortPressLogDisplay() {
 }
 
 void handleLongPressLogDisplay() {
-
 
 }
 

@@ -17,7 +17,6 @@ void ICOM7100Configurator::sendCommand(const String& cmd) {
     for (size_t i = 0; i < cmd.length(); i++) {
         checksum ^= cmd[i];
     }
-
     // Send command with checksum
     radio.print(cmd);
     if (checksum < 16) radio.print("0");
