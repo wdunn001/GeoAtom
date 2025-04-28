@@ -2,13 +2,14 @@
 
 // Constructor implementation
 ICOM7100Configurator::ICOM7100Configurator(HardwareSerial& serial) 
-    : radioSerial(serial), lastCommandTime(0) {
+    : radio(serial), lastCommandTime(0) {
 }
 
 // Helper function to send command with checksum
 void ICOM7100Configurator::sendCommand(const String& cmd) {
     if (millis() - lastCommandTime < COMMAND_DELAY) {
-        delay(COMMAND_DELAY);
+        // Not enough time has passed, so skip sending this command
+        return;
     }
     
     // Calculate checksum
@@ -16,48 +17,145 @@ void ICOM7100Configurator::sendCommand(const String& cmd) {
     for (size_t i = 0; i < cmd.length(); i++) {
         checksum ^= cmd[i];
     }
-    
+
     // Send command with checksum
-    radioSerial.print(cmd);
-    if (checksum < 16) radioSerial.print("0");
-    radioSerial.print(checksum, HEX);
-    radioSerial.print("\r\n");
+    radio.print(cmd);
+    if (checksum < 16) radio.print("0");
+    radio.print(checksum, HEX);
+    radio.print("\r\n");
     
     lastCommandTime = millis();
 }
 
+
 // NMEA Forwarding
 void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorrection) {
-    static unsigned long lastForwardTime = 0;
-    const unsigned long FORWARD_INTERVAL = 1000; // Forward every second
+    static unsigned long lastSendTime = 0;
+    const unsigned long FORWARD_INTERVAL = 500; // 2Hz
 
-    if (millis() - lastForwardTime >= FORWARD_INTERVAL) {
+    unsigned long now = millis();
+    if (now - lastSendTime >= FORWARD_INTERVAL) {
+        // Always send GGA message
+        String ggaMessage = "$GPGGA,";
+        if (gps.time.isValid()) {
+            // Format time as HHMMSS.SS
+            ggaMessage += String(gps.time.hour(), DEC);
+            if (gps.time.hour() < 10) ggaMessage += "0";
+            ggaMessage += String(gps.time.minute(), DEC);
+            if (gps.time.minute() < 10) ggaMessage += "0";
+            ggaMessage += String(gps.time.second(), DEC);
+            if (gps.time.second() < 10) ggaMessage += "0";
+            ggaMessage += ".00,";
+        } else {
+            ggaMessage += ",,,";
+        }
+
         if (gps.location.isValid()) {
-            // Construct GGA message
-            String ggaMessage = "$GPGGA,";
-            ggaMessage += String(gps.time.hour()) + String(gps.time.minute()) + String(gps.time.second()) + ".00,";
-            ggaMessage += String(abs(gps.location.lat()), 4) + (gps.location.lat() < 0 ? "S," : "N,");
-            ggaMessage += String(abs(gps.location.lng()), 4) + (gps.location.lng() < 0 ? "W," : "E,");
+            // Format latitude as DDMM.MMMM
+            float lat = abs(gps.location.lat());
+            int latDeg = (int)lat;
+            float latMin = (lat - latDeg) * 60.0;
+            ggaMessage += String(latDeg, DEC);
+            if (latDeg < 10) ggaMessage += "0";
+            ggaMessage += String(latMin, 4) + (gps.location.lat() < 0 ? "S," : "N,");
+
+            // Format longitude as DDDMM.MMMM
+            float lng = abs(gps.location.lng());
+            int lngDeg = (int)lng;
+            float lngMin = (lng - lngDeg) * 60.0;
+            ggaMessage += String(lngDeg, DEC);
+            if (lngDeg < 100) ggaMessage += "0";
+            if (lngDeg < 10) ggaMessage += "0";
+            ggaMessage += String(lngMin, 4) + (gps.location.lng() < 0 ? "W," : "E,");
+
             ggaMessage += "1,"; // Fix quality
             ggaMessage += String(gps.satellites.value()) + ",";
             ggaMessage += String(gps.hdop.hdop(), 1) + ",";
             ggaMessage += String(gps.altitude.meters() + altitudeCorrection, 1) + ",M,";
-            ggaMessage += "0.0,M,,"; // Geoid separation and age of diff
-
-            // Calculate checksum
-            uint8_t checksum = 0;
-            for (size_t i = 1; i < ggaMessage.length(); i++) {
-                checksum ^= ggaMessage[i];
-            }
-            ggaMessage += "*";
-            if (checksum < 16) ggaMessage += "0";
-            ggaMessage += String(checksum, HEX);
-            ggaMessage += "\r\n";
-
-            // Send to Radio
-            radioSerial.print(ggaMessage);
+        } else {
+            ggaMessage += ",,,,,,,";
         }
-        lastForwardTime = millis();
+        ggaMessage += "0.0,M,,";
+
+        // Calculate checksum
+        uint8_t checksum = 0;
+        for (size_t i = 1; i < ggaMessage.length(); i++) checksum ^= ggaMessage[i];
+        ggaMessage += "*";
+        if (checksum < 16) ggaMessage += "0";
+        ggaMessage += String(checksum, HEX);
+        ggaMessage += "\r\n"; // Explicit CRLF
+        radio.print(ggaMessage);
+
+        // Always send RMC message
+        String rmcMessage = "$GPRMC,";
+        if (gps.time.isValid()) {
+            // Format time as HHMMSS.SS
+            rmcMessage += String(gps.time.hour(), DEC);
+            if (gps.time.hour() < 10) rmcMessage += "0";
+            rmcMessage += String(gps.time.minute(), DEC);
+            if (gps.time.minute() < 10) rmcMessage += "0";
+            rmcMessage += String(gps.time.second(), DEC);
+            if (gps.time.second() < 10) rmcMessage += "0";
+            rmcMessage += ".00,";
+        } else {
+            rmcMessage += ",,,";
+        }
+
+        if (gps.location.isValid()) {
+            rmcMessage += "A,"; // Status
+            // Format latitude as DDMM.MMMM
+            float lat = abs(gps.location.lat());
+            int latDeg = (int)lat;
+            float latMin = (lat - latDeg) * 60.0;
+            rmcMessage += String(latDeg, DEC);
+            if (latDeg < 10) rmcMessage += "0";
+            rmcMessage += String(latMin, 4) + (gps.location.lat() < 0 ? "S," : "N,");
+
+            // Format longitude as DDDMM.MMMM
+            float lng = abs(gps.location.lng());
+            int lngDeg = (int)lng;
+            float lngMin = (lng - lngDeg) * 60.0;
+            rmcMessage += String(lngDeg, DEC);
+            if (lngDeg < 100) rmcMessage += "0";
+            if (lngDeg < 10) rmcMessage += "0";
+            rmcMessage += String(lngMin, 4) + (gps.location.lng() < 0 ? "W," : "E,");
+
+            rmcMessage += String(gps.speed.knots(), 1) + ",";
+            rmcMessage += String(gps.course.deg(), 1) + ",";
+            if (gps.date.isValid()) {
+                // Format date as DDMMYY
+                rmcMessage += String(gps.date.day(), DEC);
+                if (gps.date.day() < 10) rmcMessage += "0";
+                rmcMessage += String(gps.date.month(), DEC);
+                if (gps.date.month() < 10) rmcMessage += "0";
+                rmcMessage += String(gps.date.year() % 100, DEC);
+            } else {
+                rmcMessage += ",,,";
+            }
+        } else {
+            rmcMessage += "V,,,,,,,,,";
+        }
+        rmcMessage += "0.0,E,";
+
+        // Calculate checksum
+        checksum = 0;
+        for (size_t i = 1; i < rmcMessage.length(); i++) checksum ^= rmcMessage[i];
+        rmcMessage += "*";
+        if (checksum < 16) rmcMessage += "0";
+        rmcMessage += String(checksum, HEX);
+        rmcMessage += "\r\n"; // Explicit CRLF
+        radio.print(rmcMessage);
+
+        lastSendTime = now;
+    }
+
+    // Check for non-standard messages (e.g., GMEA) and convert if needed
+    while (radio.available()) {
+        String line = radio.readStringUntil('\n');
+        line.trim();
+        if (line.startsWith("$GMEA")) {
+            logMessage("Received non-standard GMEA: " + line);
+        }
     }
 }
 
@@ -153,9 +251,44 @@ void ICOM7100Configurator::disableGPSA() {
     sendCommand("GA0");
 }
 
+// Status Query
+bool ICOM7100Configurator::queryStatus() {
+    // Send status query command
+    uint8_t statusCmd[] = {0xFE, 0xFE, 0x88, 0xE0, 0x03, 0xFD};
+    radio.write(statusCmd, sizeof(statusCmd));
+    
+    // Wait for response
+    delay(100);
+    
+    // Read response
+    uint8_t response[8];
+    int bytesRead = 0;
+    unsigned long startTime = millis();
+    while (millis() - startTime < 500 && bytesRead < sizeof(response)) {
+        if (radio.available()) {
+            response[bytesRead++] = radio.read();
+        }
+    }
+    
+    // Check if response is valid (FE FE E0 88 03 XX FD)
+    if (bytesRead >= 7 && 
+        response[0] == 0xFE && 
+        response[1] == 0xFE && 
+        response[2] == 0xE0 && 
+        response[3] == 0x88 && 
+        response[4] == 0x03 && 
+        response[6] == 0xFD) {
+        logMessage("Radio status query successful");
+        return true;
+    }
+    
+    logMessage("Radio status query failed");
+    return false;
+}
+
 // Initialize radio with default settings
 void ICOM7100Configurator::initialize() {
-    // Set default GPS baud rate
+    // Set default GPS baud rate to match our GPS module
     setGPSBaudRate(4800);
     
     // Enable GPS display
@@ -166,4 +299,7 @@ void ICOM7100Configurator::initialize() {
     
     // Set default squelch
     setSquelch(20);
+
+    // Enable GPS-A functionality
+    enableGPSA();
 } 

@@ -5,9 +5,12 @@
 #include <HardwareSerial.h>
 #include <TinyGPS++.h>
 
+// Forward declare the logMessage function
+void logMessage(const String& msg);
+
 class ICOM7100Configurator {
 private:
-    HardwareSerial& radioSerial;
+    HardwareSerial& radio;
     unsigned long lastCommandTime;
     const unsigned long COMMAND_DELAY = 100; // 100ms delay between commands
 
@@ -52,6 +55,9 @@ public:
     // GPS-A Operations
     void enableGPSA();
     void disableGPSA();
+
+    // Status Query
+    bool queryStatus();
 
     // Initialize radio with default settings
     void initialize();
