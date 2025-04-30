@@ -220,6 +220,7 @@ bool useM5StackInterference = true;    // Whether to use M5Stack's built-in magn
 // Add these configuration keys with the other preference keys
 const char* KEY_USE_M5_SMOOTHING = "useM5Smooth";     // Key for M5Stack smoothing preference
 const char* KEY_USE_M5_INTERFERENCE = "useM5Interf";  // Key for M5Stack interference preference
+const char* KEY_RADIO_USB_MODE = "radioUsbMode";     // Key for Radio USB mode
 
 // Pin definitions based on physical connections
 // --- Verified Working Configuration for BN-880 & M5Atom Echo ---
@@ -528,6 +529,7 @@ int radioVolume = 50;
 int radioSquelch = 20;
 bool radioGPSDisplay = true;
 bool radioGPSA = true;
+bool radioUsbMode = false; // Add USB mode flag
 int radioGPSBaudRate = 9600;
 int radioFrequency = 145000000; // Default to 2m band
 String radioMode = "FM"; // Default mode
@@ -594,6 +596,7 @@ void setup() {
   // Initialize ICOM7100 configurator
   radioConfig = new ICOM7100Configurator(Radio);
   radioConfig->initialize();
+  radioConfig->enableUSBMode(radioUsbMode); // Set USB mode from preferences
   
   logMessage("System initializing...");
 
@@ -692,6 +695,9 @@ void setup() {
   // Load M5Stack settings, default to true if not found
   useM5StackSmoothing = preferences.getBool(KEY_USE_M5_SMOOTHING, true);
   useM5StackInterference = preferences.getBool(KEY_USE_M5_INTERFERENCE, true);
+  
+  // Load radio settings
+  radioUsbMode = preferences.getBool(KEY_RADIO_USB_MODE, false);
  
   
   // Load other settings (declination, inversion, etc.)
@@ -959,8 +965,16 @@ void loop() {
       gps.encode(GPS.read());
     }
     
-    // Forward NMEA messages to Radio
-    radioConfig->forwardNMEAToRadio(gps, altitudeCorrection);
+    // Forward NMEA messages based on configuration
+    if (radioConfig != nullptr) {
+      // Always forward to radio
+      radioConfig->forwardNMEAToRadio(gps, altitudeCorrection);
+      
+      // Forward to USB if USB mode is enabled
+      if (radioConfig->isUSBModeEnabled()) {
+        radioConfig->forwardNMEAToUSB(gps, altitudeCorrection);
+      }
+    }
   }
 
   // Read and parse NMEA from Radio
@@ -2086,7 +2100,7 @@ void displayRadioSettings() {
 
   // Calculate which settings to show based on current index
   int startIndex = (radioSettingIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
-  int endIndex = min(startIndex + ITEMS_PER_PAGE, 7); // 7 total items (5 settings + 2 actions)
+  int endIndex = min(startIndex + ITEMS_PER_PAGE, 8); // 8 total items (6 settings + 2 actions)
 
   // Display current settings with highlight for selected setting
   for (int i = startIndex; i < endIndex; i++) {
@@ -2127,23 +2141,27 @@ void displayRadioSettings() {
         }
         break;
       case 5:
-        display.print("Save & Exit");
+        display.print("USB Mode: ");
+        display.print(radioUsbMode ? "ON" : "OFF");
         break;
       case 6:
+        display.print("Save & Exit");
+        break;
+      case 7:
         display.print("Exit");
         break;
     }
   }
 
   // Show scroll indicator if there are more settings
-  if (startIndex > 0 || endIndex < 7) {
+  if (startIndex > 0 || endIndex < 8) {
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(SCREEN_WIDTH - 8, SETTINGS_START_Y);
     if (startIndex > 0) {
       display.print("^"); // Up arrow
     }
     display.setCursor(SCREEN_WIDTH - 8, SETTINGS_END_Y - 8);
-    if (endIndex < 7) {
+    if (endIndex < 8) {
       display.print("v"); // Down arrow
     }
   }
@@ -2200,10 +2218,20 @@ void handleShortPressRadioSettings() {
           radioDStarMessage = "";
         }
         break;
+      case 5: // USB Mode
+        radioUsbMode = !radioUsbMode;
+        if (radioConfig != nullptr) {
+          radioConfig->enableUSBMode(radioUsbMode);
+          // Save the USB mode setting to preferences
+          preferences.begin(PREF_NAMESPACE, false);
+          preferences.putBool(KEY_RADIO_USB_MODE, radioUsbMode);
+          preferences.end();
+        }
+        break;
     }
   } else {
     // Select next setting/action
-    radioSettingIndex = (radioSettingIndex + 1) % 7;
+    radioSettingIndex = (radioSettingIndex + 1) % 8;
   }
   displayRadioSettings();
 }
@@ -2239,6 +2267,16 @@ void handleDoubleClickRadioSettings() {
           radioDStarMessage = "";
         }
         break;
+      case 5: // USB Mode
+        radioUsbMode = !radioUsbMode;
+        if (radioConfig != nullptr) {
+          radioConfig->enableUSBMode(radioUsbMode);
+          // Save the USB mode setting to preferences
+          preferences.begin(PREF_NAMESPACE, false);
+          preferences.putBool(KEY_RADIO_USB_MODE, radioUsbMode);
+          preferences.end();
+        }
+        break;
     }
     displayRadioSettings();
   }
@@ -2252,11 +2290,11 @@ void handleLongPressRadioSettings() {
     logMessage("Setting saved");
   } else {
     // Handle actions or enter edit mode
-    if (radioSettingIndex == 5) { // Save & Exit
+    if (radioSettingIndex == 6) { // Save & Exit
       currentDisplayMode = DisplayMode::LOG_DISPLAY;
       logMessage("Radio settings saved");
       return;
-    } else if (radioSettingIndex == 6) { // Exit
+    } else if (radioSettingIndex == 7) { // Exit
       currentDisplayMode = DisplayMode::LOG_DISPLAY;
       logMessage("Radio settings not saved");
       return;
@@ -2266,7 +2304,8 @@ void handleLongPressRadioSettings() {
       logMessage("Editing " + String(radioSettingIndex == 0 ? "Frequency" : 
                                    radioSettingIndex == 1 ? "Mode" :
                                    radioSettingIndex == 2 ? "Power" :
-                                   radioSettingIndex == 3 ? "Memory" : "D-STAR"));
+                                   radioSettingIndex == 3 ? "Memory" :
+                                   radioSettingIndex == 4 ? "D-STAR" : "USB Mode"));
     }
   }
   displayRadioSettings();

@@ -2,7 +2,7 @@
 
 // Constructor implementation
 ICOM7100Configurator::ICOM7100Configurator(HardwareSerial& serial) 
-    : radio(serial), lastCommandTime(0) {
+    : radio(serial), lastCommandTime(0), usbModeEnabled(false) {
 }
 
 // Helper function to send command with checksum
@@ -23,12 +23,226 @@ void ICOM7100Configurator::sendCommand(const String& cmd) {
     radio.print(checksum, HEX);
     radio.print("\r\n");
     
+    // If USB mode is enabled, also send to Serial
+    if (usbModeEnabled) {
+        Serial.print(cmd);
+        if (checksum < 16) Serial.print("0");
+        Serial.print(checksum, HEX);
+        Serial.print("\r\n");
+    }
+    
     lastCommandTime = millis();
 }
 
-
 // NMEA Forwarding
 void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorrection) {
+    static unsigned long lastSendTime = 0;
+    const unsigned long FORWARD_INTERVAL = 500; // 2Hz
+
+    unsigned long now = millis();
+    if (now - lastSendTime >= FORWARD_INTERVAL) {
+        bool hasValidData = gps.location.isValid() && gps.time.isValid();
+
+        // Always send GGA message with consistent format
+        String ggaMessage = "$GPGGA,";
+        
+        // Time field - always in same format
+        if (gps.time.isValid()) {
+            // Format time as HHMMSS.SS
+            String hour = String(gps.time.hour());
+            if (gps.time.hour() < 10) hour = "0" + hour;
+            String minute = String(gps.time.minute());
+            if (gps.time.minute() < 10) minute = "0" + minute;
+            String second = String(gps.time.second());
+            if (gps.time.second() < 10) second = "0" + second;
+            ggaMessage += hour + minute + second + ".00,";
+        } else {
+            ggaMessage += "000000.00,";
+        }
+
+        // Position and quality fields - always in same format
+        if (gps.location.isValid()) {
+            // Format latitude as DDMM.MMMM
+            float lat = abs(gps.location.lat());
+            int latDeg = (int)lat;
+            float latMin = (lat - latDeg) * 60.0;
+            String latDegStr = String(latDeg);
+            if (latDeg < 10) latDegStr = "0" + latDegStr;
+            String latMinStr = String(latMin, 4);
+            while (latMinStr.length() < 7) latMinStr = "0" + latMinStr; // Ensure 4 decimal places
+            ggaMessage += latDegStr + latMinStr + (gps.location.lat() < 0 ? ",S," : ",N,");
+
+            // Format longitude as DDDMM.MMMM
+            float lng = abs(gps.location.lng());
+            int lngDeg = (int)lng;
+            float lngMin = (lng - lngDeg) * 60.0;
+            String lngDegStr = String(lngDeg);
+            if (lngDeg < 100) lngDegStr = "0" + lngDegStr;
+            if (lngDeg < 10) lngDegStr = "0" + lngDegStr;
+            String lngMinStr = String(lngMin, 4);
+            while (lngMinStr.length() < 7) lngMinStr = "0" + lngMinStr; // Ensure 4 decimal places
+            ggaMessage += lngDegStr + lngMinStr + (gps.location.lng() < 0 ? ",W," : ",E,");
+
+            // Quality indicator (1 = GPS fix)
+            ggaMessage += "1,";
+            
+            // Number of satellites
+            String sats = String(gps.satellites.value());
+            if (gps.satellites.value() < 10) sats = "0" + sats;
+            ggaMessage += sats + ",";
+            
+            // HDOP
+            ggaMessage += String(gps.hdop.hdop(), 1) + ",";
+            
+            // Altitude
+            ggaMessage += String(gps.altitude.meters() + altitudeCorrection, 1) + ",M,";
+        } else {
+            ggaMessage += "0000.0000,N,00000.0000,W,0,00,0.0,0.0,M,";
+        }
+        
+        // Remaining fields - always the same
+        ggaMessage += "0.0,M,,";
+
+        // Calculate checksum
+        uint8_t checksum = 0;
+        for (size_t i = 1; i < ggaMessage.length(); i++) checksum ^= ggaMessage[i];
+        ggaMessage += "*";
+        if (checksum < 16) ggaMessage += "0";
+        ggaMessage += String(checksum, HEX);
+        ggaMessage += "\r\n"; // Explicit CRLF
+        
+        // Send GGA message and track statistics
+        radio.print(ggaMessage);
+        ggaMessagesSent++;
+        
+        // Track message quality
+        if (!hasValidData) {
+            nullMessages++;
+        } else {
+            convertedMessages++;
+        }
+        
+        // Also send to USB if USB mode is enabled
+        if (usbModeEnabled) {
+            Serial.print(ggaMessage);
+        }
+
+        // Always send RMC message with consistent format
+        String rmcMessage = "$GPRMC,";
+        
+        // Time field - always in same format
+        if (gps.time.isValid()) {
+            // Format time as HHMMSS.SS
+            String hour = String(gps.time.hour());
+            if (gps.time.hour() < 10) hour = "0" + hour;
+            String minute = String(gps.time.minute());
+            if (gps.time.minute() < 10) minute = "0" + minute;
+            String second = String(gps.time.second());
+            if (gps.time.second() < 10) second = "0" + second;
+            rmcMessage += hour + minute + second + ".00,";
+        } else {
+            rmcMessage += "000000.00,";
+        }
+
+        // Status and position fields - always in same format
+        if (gps.location.isValid()) {
+            rmcMessage += "A,"; // Status (A = valid)
+            
+            // Format latitude as DDMM.MMMM
+            float lat = abs(gps.location.lat());
+            int latDeg = (int)lat;
+            float latMin = (lat - latDeg) * 60.0;
+            String latDegStr = String(latDeg);
+            if (latDeg < 10) latDegStr = "0" + latDegStr;
+            String latMinStr = String(latMin, 4);
+            while (latMinStr.length() < 7) latMinStr = "0" + latMinStr; // Ensure 4 decimal places
+            rmcMessage += latDegStr + latMinStr + (gps.location.lat() < 0 ? ",S," : ",N,");
+
+            // Format longitude as DDDMM.MMMM
+            float lng = abs(gps.location.lng());
+            int lngDeg = (int)lng;
+            float lngMin = (lng - lngDeg) * 60.0;
+            String lngDegStr = String(lngDeg);
+            if (lngDeg < 100) lngDegStr = "0" + lngDegStr;
+            if (lngDeg < 10) lngDegStr = "0" + lngDegStr;
+            String lngMinStr = String(lngMin, 4);
+            while (lngMinStr.length() < 7) lngMinStr = "0" + lngMinStr; // Ensure 4 decimal places
+            rmcMessage += lngDegStr + lngMinStr + (gps.location.lng() < 0 ? ",W," : ",E,");
+
+            // Speed
+            rmcMessage += String(gps.speed.knots(), 1) + ",";
+            
+            // Course
+            rmcMessage += String(gps.course.deg(), 1) + ",";
+            
+            // Date
+            if (gps.date.isValid()) {
+                // Format date as DDMMYY
+                String day = String(gps.date.day());
+                if (gps.date.day() < 10) day = "0" + day;
+                String month = String(gps.date.month());
+                if (gps.date.month() < 10) month = "0" + month;
+                String year = String(gps.date.year() % 100);
+                if ((gps.date.year() % 100) < 10) year = "0" + year;
+                rmcMessage += day + month + year + ",";
+            } else {
+                rmcMessage += "010100,";
+            }
+        } else {
+            rmcMessage += "V,0000.0000,N,00000.0000,W,0.0,0.0,010100,";
+        }
+        
+        // Remaining fields - always the same
+        rmcMessage += "0.0,E";
+
+        // Calculate checksum
+        checksum = 0;
+        for (size_t i = 1; i < rmcMessage.length(); i++) checksum ^= rmcMessage[i];
+        rmcMessage += "*";
+        if (checksum < 16) rmcMessage += "0";
+        rmcMessage += String(checksum, HEX);
+        rmcMessage += "\r\n"; // Explicit CRLF
+        
+        // Send RMC message and track statistics
+        radio.print(rmcMessage);
+        rmcMessagesSent++;
+        
+        // Track message quality for RMC
+        if (!hasValidData) {
+            nullMessages++;
+        } else {
+            convertedMessages++;
+        }
+        
+        // Also send to USB if USB mode is enabled
+        if (usbModeEnabled) {
+            Serial.print(rmcMessage);
+        }
+
+        lastSendTime = now;
+    }
+
+    // Check for non-standard messages (e.g., GMEA) and convert if needed
+    while (radio.available()) {
+        String line = radio.readStringUntil('\n');
+        line.trim();
+        if (line.startsWith("$GMEA")) {
+            logMessage("Received non-standard GMEA: " + line);
+            messageErrors++;
+            
+            // Also forward to USB if USB mode is enabled
+            if (usbModeEnabled) {
+                Serial.println(line);
+            }
+        }
+    }
+
+    // Report statistics every 10 seconds
+    reportGPSStats();
+}
+
+// New method to forward NMEA data to USB port
+void ICOM7100Configurator::forwardNMEAToUSB(TinyGPSPlus& gps, int altitudeCorrection) {
     static unsigned long lastSendTime = 0;
     const unsigned long FORWARD_INTERVAL = 500; // 2Hz
 
@@ -83,7 +297,7 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
         if (checksum < 16) ggaMessage += "0";
         ggaMessage += String(checksum, HEX);
         ggaMessage += "\r\n"; // Explicit CRLF
-        radio.print(ggaMessage);
+        Serial.print(ggaMessage);  // Send to USB serial port
 
         // Always send RMC message
         String rmcMessage = "$GPRMC,";
@@ -143,19 +357,21 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
         if (checksum < 16) rmcMessage += "0";
         rmcMessage += String(checksum, HEX);
         rmcMessage += "\r\n"; // Explicit CRLF
-        radio.print(rmcMessage);
+        Serial.print(rmcMessage);  // Send to USB serial port
 
         lastSendTime = now;
     }
+}
 
-    // Check for non-standard messages (e.g., GMEA) and convert if needed
-    while (radio.available()) {
-        String line = radio.readStringUntil('\n');
-        line.trim();
-        if (line.startsWith("$GMEA")) {
-            logMessage("Received non-standard GMEA: " + line);
-        }
-    }
+// USB Mode enabler
+void ICOM7100Configurator::enableUSBMode(bool enable) {
+    usbModeEnabled = enable;
+    logMessage("USB mode " + String(enable ? "enabled" : "disabled"));
+}
+
+// USB Mode getter
+bool ICOM7100Configurator::isUSBModeEnabled() const {
+    return usbModeEnabled;
 }
 
 // Basic Commands
@@ -256,6 +472,11 @@ bool ICOM7100Configurator::queryStatus() {
     uint8_t statusCmd[] = {0xFE, 0xFE, 0x88, 0xE0, 0x03, 0xFD};
     radio.write(statusCmd, sizeof(statusCmd));
     
+    // Also send to USB if USB mode is enabled
+    if (usbModeEnabled) {
+        Serial.write(statusCmd, sizeof(statusCmd));
+    }
+    
     // Wait for response
     delay(100);
     
@@ -301,4 +522,27 @@ void ICOM7100Configurator::initialize() {
 
     // Enable GPS-A functionality
     enableGPSA();
+    
+    // USB mode is disabled by default (set in constructor)
+    logMessage("Radio initialized. USB mode: " + String(usbModeEnabled ? "ON" : "OFF"));
+}
+
+void ICOM7100Configurator::reportGPSStats() {
+    unsigned long now = millis();
+    if (now - lastStatsReportTime >= STATS_REPORT_INTERVAL) {
+        String statsMessage = "GPS Stats - GGA: " + String(ggaMessagesSent) + 
+                            ", RMC: " + String(rmcMessagesSent) + 
+                            ", Errors: " + String(messageErrors) +
+                            ", Null: " + String(nullMessages) +
+                            ", Converted: " + String(convertedMessages);
+        logMessage(statsMessage);
+        
+        // Reset counters
+        ggaMessagesSent = 0;
+        rmcMessagesSent = 0;
+        messageErrors = 0;
+        nullMessages = 0;
+        convertedMessages = 0;
+        lastStatsReportTime = now;
+    }
 } 
