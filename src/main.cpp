@@ -563,6 +563,68 @@ static unsigned long lastRadioStatusQuery = 0;
 static bool lastRadioStatus = false;
 const unsigned long RADIO_STATUS_QUERY_INTERVAL = 5000; // 5 seconds
 
+// Smart heading/speed filter state
+static const int SPEED_AVG_WINDOW = 10; // seconds
+static const int SPEED_AVG_SAMPLES = SPEED_AVG_WINDOW * 2; // 2Hz update
+static float speedHistory[SPEED_AVG_SAMPLES] = {0};
+static int speedHistoryIndex = 0;
+static bool isActuallyMoving = false;
+static float lastCheckLat = 0.0f, lastCheckLng = 0.0f;
+static unsigned long lastCheckTime = 0;
+
+// Robust movement detection variables
+static int movingCounter = 0;
+static int notMovingCounter = 0;
+static bool filteredIsMoving = false;
+const int MOVING_DEBOUNCE = 3; // require 3 consecutive checks
+const float MOVEMENT_DIST_THRESHOLD = 5.0f; // meters in 2s
+const float SPEED_THRESHOLD = 2.0f; // km/h
+// Compass smoothing
+static float lastSmoothedHeading = 0.0f;
+const float HEADING_SMOOTH_ALPHA = 0.2f; // 0.0 = no smoothing, 1.0 = instant
+
+// Smart heading and speed functions
+// NOTE: getSmartHeading() returns GPS course as-is, but INVERTS magnetometer heading for radio/NMEA use.
+// The OLED display should apply compassInverted as needed for user display, independently.
+float getSmartHeading() {
+    float avgSpeed = 0.0f;
+    for (int i = 0; i < SPEED_AVG_SAMPLES; ++i) avgSpeed += speedHistory[i];
+    avgSpeed /= SPEED_AVG_SAMPLES;
+    float heading = -1;
+    if (gps.speed.isValid() && avgSpeed > 2.0 && isActuallyMoving && gps.course.isValid()) {
+        logMessage("Using GPS course for heading (avgSpeed=" + String(avgSpeed, 2) + " moving=" + String(isActuallyMoving) + ")");
+        heading = gps.course.deg(); // DO NOT invert GPS course
+    } else if (activeCompass != nullptr) {
+        int rawHeading = activeCompass->getAzimuth();
+        // Smooth heading
+        float delta = rawHeading - lastSmoothedHeading;
+        if (delta > 180) delta -= 360;
+        if (delta < -180) delta += 360;
+        lastSmoothedHeading += HEADING_SMOOTH_ALPHA * delta;
+        if (lastSmoothedHeading < 0) lastSmoothedHeading += 360;
+        if (lastSmoothedHeading >= 360) lastSmoothedHeading -= 360;
+        // Invert for radio/NMEA
+        heading = fmod(lastSmoothedHeading + 180.0f, 360.0f);
+        logMessage("Using magnetometer for heading (inverted for radio, smoothed, avgSpeed=" + String(avgSpeed, 2) + " moving=" + String(isActuallyMoving) + ")");
+    }
+    return heading;
+}
+// Smart speed: zero if not actually moving
+float getSmartSpeed() {
+  float avgSpeed = 0.0f;
+  for (int i = 0; i < SPEED_AVG_SAMPLES; ++i) avgSpeed += speedHistory[i];
+  avgSpeed /= SPEED_AVG_SAMPLES;
+  if (!isActuallyMoving || avgSpeed < 2.0) {
+    return 0.0f;
+  }
+  return gps.speed.isValid() ? gps.speed.kmph() : 0.0f;
+}
+
+// Expose for use in ICOM7100Configurator.cpp
+extern float getSmartHeading();
+extern float getSmartSpeed();
+extern bool isActuallyMoving;
+
 void setup() {
   // Initialize M5 hardware with proper configuration for M5Atom Echo
   auto cfg = M5.config();
@@ -1028,6 +1090,43 @@ void loop() {
       case DisplayMode::RADIO_STATUS:
         displayRadioStatus();
         break;
+    }
+  }
+
+  // Update speed history every 500ms
+  static unsigned long lastSpeedUpdate = 0;
+  if (millis() - lastSpeedUpdate > 500) {
+    lastSpeedUpdate = millis();
+    float spd = gps.speed.isValid() ? gps.speed.kmph() : 0.0f;
+    speedHistory[speedHistoryIndex] = spd;
+    speedHistoryIndex = (speedHistoryIndex + 1) % SPEED_AVG_SAMPLES;
+  }
+  // Calculate average speed
+  float avgSpeed = 0.0f;
+  for (int i = 0; i < SPEED_AVG_SAMPLES; ++i) avgSpeed += speedHistory[i];
+  avgSpeed /= SPEED_AVG_SAMPLES;
+  // Improved movement detection with debounce and higher threshold
+  if (millis() - lastCheckTime > 2000) {
+    lastCheckTime = millis();
+    if (gps.location.isValid()) {
+      float curLat = gps.location.lat();
+      float curLng = gps.location.lng();
+      float dLat = curLat - lastCheckLat;
+      float dLng = curLng - lastCheckLng;
+      float dist = sqrt(dLat * dLat + dLng * dLng) * 111320.0f; // meters per degree
+      bool currentlyMoving = (dist > MOVEMENT_DIST_THRESHOLD) && (avgSpeed > SPEED_THRESHOLD);
+      if (currentlyMoving) {
+        movingCounter++;
+        notMovingCounter = 0;
+      } else {
+        notMovingCounter++;
+        movingCounter = 0;
+      }
+      if (movingCounter >= MOVING_DEBOUNCE) filteredIsMoving = true;
+      if (notMovingCounter >= MOVING_DEBOUNCE) filteredIsMoving = false;
+      isActuallyMoving = filteredIsMoving;
+      lastCheckLat = curLat;
+      lastCheckLng = curLng;
     }
   }
 }

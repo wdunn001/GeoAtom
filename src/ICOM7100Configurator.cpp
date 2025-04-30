@@ -9,6 +9,12 @@
 #include <FS.h>
 #include <SPIFFS.h>
 
+// Add externs for smart heading/speed and filtered lat/lng
+extern float getSmartHeading();
+extern float getSmartSpeed();
+extern float getLatitude();
+extern float getLongitude();
+
 // Constructor implementation
 ICOM7100Configurator::ICOM7100Configurator(HardwareSerial& serial) 
     : radio(serial), lastCommandTime(0){
@@ -152,7 +158,7 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
         // Position data
         if (gps.location.isValid()) {
             // Format latitude as DDMM.MMMM
-            float lat = abs(gps.location.lat());
+            float lat = abs(getLatitude());
             int latDeg = (int)lat;
             float latMin = (lat - latDeg) * 60.0;
             String latDegStr = String(latDeg);
@@ -160,10 +166,10 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             
             char latMinStr[10];
             sprintf(latMinStr, "%07.4f", latMin); // Ensure 4 decimal places with leading zeros
-            ggaMessage += latDegStr + latMinStr + "," + (gps.location.lat() < 0 ? "S," : "N,");
+            ggaMessage += latDegStr + latMinStr + "," + (getLatitude() < 0 ? "S," : "N,");
 
             // Format longitude as DDDMM.MMMM
-            float lng = abs(gps.location.lng());
+            float lng = abs(getLongitude());
             int lngDeg = (int)lng;
             float lngMin = (lng - lngDeg) * 60.0;
             String lngDegStr = String(lngDeg);
@@ -172,7 +178,7 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             
             char lngMinStr[10];
             sprintf(lngMinStr, "%07.4f", lngMin); // Ensure 4 decimal places with leading zeros
-            ggaMessage += lngDegStr + lngMinStr + "," + (gps.location.lng() < 0 ? "W," : "E,");
+            ggaMessage += lngDegStr + lngMinStr + "," + (getLongitude() < 0 ? "W," : "E,");
 
             // Quality indicator and satellite count
             ggaMessage += "1,"; // Fix quality: 1 = GPS fix
@@ -265,7 +271,7 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             rmcMessage += "A,"; // Status (A = valid)
             
             // Format latitude as DDMM.MMMM
-            float lat = abs(gps.location.lat());
+            float lat = abs(getLatitude());
             int latDeg = (int)lat;
             float latMin = (lat - latDeg) * 60.0;
             String latDegStr = String(latDeg);
@@ -273,10 +279,10 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             
             char latMinStr[10];
             sprintf(latMinStr, "%07.4f", latMin); // Ensure 4 decimal places with leading zeros
-            rmcMessage += latDegStr + latMinStr + "," + (gps.location.lat() < 0 ? "S," : "N,");
+            rmcMessage += latDegStr + latMinStr + "," + (getLatitude() < 0 ? "S," : "N,");
 
             // Format longitude as DDDMM.MMMM
-            float lng = abs(gps.location.lng());
+            float lng = abs(getLongitude());
             int lngDeg = (int)lng;
             float lngMin = (lng - lngDeg) * 60.0;
             String lngDegStr = String(lngDeg);
@@ -285,20 +291,18 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             
             char lngMinStr[10];
             sprintf(lngMinStr, "%07.4f", lngMin); // Ensure 4 decimal places with leading zeros
-            rmcMessage += lngDegStr + lngMinStr + "," + (gps.location.lng() < 0 ? "W," : "E,");
+            rmcMessage += lngDegStr + lngMinStr + "," + (getLongitude() < 0 ? "W," : "E,");
 
             // Speed
-            if (gps.speed.isValid()) {
-            rmcMessage += String(gps.speed.knots(), 1) + ",";
-            } else {
-                rmcMessage += "0.0,"; // Zero speed if invalid
-            }
+            float smartSpeed = getSmartSpeed();
+            rmcMessage += String(smartSpeed * 0.539957, 1) + ","; // Convert km/h to knots
             
             // Course
-            if (gps.course.isValid()) {
-            rmcMessage += String(gps.course.deg(), 1) + ",";
+            float smartHeading = getSmartHeading();
+            if (smartHeading >= 0) {
+                rmcMessage += String(smartHeading, 1) + ",";
             } else {
-                rmcMessage += "0.0,"; // Zero course if invalid
+                rmcMessage += "0.0,";
             }
             
             // Date
