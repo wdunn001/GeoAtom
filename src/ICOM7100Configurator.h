@@ -13,7 +13,6 @@ private:
     HardwareSerial& radio;
     unsigned long lastCommandTime;
     const unsigned long COMMAND_DELAY = 100; // 100ms delay between commands
-    bool usbModeEnabled = false; // Flag to indicate if USB mode is enabled
 
     // GPS message statistics
     unsigned long ggaMessagesSent = 0;
@@ -26,7 +25,11 @@ private:
 
     // Helper function to send command with checksum
     void sendCommand(const String& cmd);
-    void reportGPSStats(); // New method to report statistics
+    void reportGPSStats(); // Method to report statistics
+    
+    // Helper methods for GPS message generation
+    void generateBackupGSVMessages(TinyGPSPlus& gps, int satCount);
+    void generateBackupGSAMessage(TinyGPSPlus& gps, int satCount);
 
 public:
     // Constructor
@@ -43,13 +46,6 @@ public:
     void setGPSBaudRate(int rate);
     void forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorrection = 0);
     
-    // New USB forwarding method
-    void forwardNMEAToUSB(TinyGPSPlus& gps, int altitudeCorrection = 0);
-    
-    // USB mode toggle
-    void enableUSBMode(bool enable);
-    bool isUSBModeEnabled() const;
-
     // Memory Operations
     void recallMemory(int channel);
     void storeMemory(int channel);

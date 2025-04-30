@@ -596,7 +596,6 @@ void setup() {
   // Initialize ICOM7100 configurator
   radioConfig = new ICOM7100Configurator(Radio);
   radioConfig->initialize();
-  radioConfig->enableUSBMode(radioUsbMode); // Set USB mode from preferences
   
   logMessage("System initializing...");
 
@@ -969,11 +968,6 @@ void loop() {
     if (radioConfig != nullptr) {
       // Always forward to radio
       radioConfig->forwardNMEAToRadio(gps, altitudeCorrection);
-      
-      // Forward to USB if USB mode is enabled
-      if (radioConfig->isUSBModeEnabled()) {
-        radioConfig->forwardNMEAToUSB(gps, altitudeCorrection);
-      }
     }
   }
 
@@ -2218,15 +2212,7 @@ void handleShortPressRadioSettings() {
           radioDStarMessage = "";
         }
         break;
-      case 5: // USB Mode
-        radioUsbMode = !radioUsbMode;
-        if (radioConfig != nullptr) {
-          radioConfig->enableUSBMode(radioUsbMode);
-          // Save the USB mode setting to preferences
-          preferences.begin(PREF_NAMESPACE, false);
-          preferences.putBool(KEY_RADIO_USB_MODE, radioUsbMode);
-          preferences.end();
-        }
+
         break;
     }
   } else {
@@ -2267,15 +2253,6 @@ void handleDoubleClickRadioSettings() {
           radioDStarMessage = "";
         }
         break;
-      case 5: // USB Mode
-        radioUsbMode = !radioUsbMode;
-        if (radioConfig != nullptr) {
-          radioConfig->enableUSBMode(radioUsbMode);
-          // Save the USB mode setting to preferences
-          preferences.begin(PREF_NAMESPACE, false);
-          preferences.putBool(KEY_RADIO_USB_MODE, radioUsbMode);
-          preferences.end();
-        }
         break;
     }
     displayRadioSettings();

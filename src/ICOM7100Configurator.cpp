@@ -2,7 +2,7 @@
 
 // Constructor implementation
 ICOM7100Configurator::ICOM7100Configurator(HardwareSerial& serial) 
-    : radio(serial), lastCommandTime(0), usbModeEnabled(false) {
+    : radio(serial), lastCommandTime(0){
 }
 
 // Helper function to send command with checksum
@@ -23,13 +23,7 @@ void ICOM7100Configurator::sendCommand(const String& cmd) {
     radio.print(checksum, HEX);
     radio.print("\r\n");
     
-    // If USB mode is enabled, also send to Serial
-    if (usbModeEnabled) {
-        Serial.print(cmd);
-        if (checksum < 16) Serial.print("0");
-        Serial.print(checksum, HEX);
-        Serial.print("\r\n");
-    }
+
     
     lastCommandTime = millis();
 }
@@ -37,16 +31,102 @@ void ICOM7100Configurator::sendCommand(const String& cmd) {
 // NMEA Forwarding
 void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorrection) {
     static unsigned long lastSendTime = 0;
+    static unsigned long lastGSVTime = 0;
+    static String nmea_buffer = ""; // Buffer to hold incomplete NMEA sentences
+    static bool gsaReceived = false;
+    static bool gsvReceived = false;
+    static unsigned long lastRealMessageTime = 0;
+    
     const unsigned long FORWARD_INTERVAL = 500; // 2Hz
+    const unsigned long GSV_INTERVAL = 1000; // Generate GSV message every second if not received
+    const unsigned long MSG_TIMEOUT = 3000; // Timeout for receiving real messages
 
     unsigned long now = millis();
+    
+    // Process GPS data from any connected receiver and forward directly
+    while (Serial1.available()) {
+        char c = Serial1.read();
+        
+        // Add character to buffer
+        if (c == '$') {
+            // New sentence starting, clear buffer
+            nmea_buffer = "$";
+        } else if (c == '\r' || c == '\n') {
+            // End of sentence, process if not empty
+            if (nmea_buffer.length() > 5) {
+                // Check if it's a valid NMEA sentence
+                if (nmea_buffer.indexOf('*') > 0) {
+                    // Forward to radio
+                    radio.println(nmea_buffer);
+                    
+                    // Log GSV and GSA messages
+                    if (nmea_buffer.startsWith("$GPGSV") || nmea_buffer.startsWith("$GLGSV")) {
+                        gsvReceived = true;
+                        logMessage("Forwarded real GSV: " + nmea_buffer);
+                    } else if (nmea_buffer.startsWith("$GPGSA") || nmea_buffer.startsWith("$GLGSA")) {
+                        gsaReceived = true;
+                        logMessage("Forwarded real GSA: " + nmea_buffer);
+                    } else if (nmea_buffer.startsWith("$GPGGA")) {
+                        // Extract real satellite count from GGA for our own reference
+                        int satIndex = nmea_buffer.indexOf(',', 7);
+                        if (satIndex > 0) {
+                            int nextComma = nmea_buffer.indexOf(',', satIndex + 1);
+                            if (nextComma > 0) {
+                                String realSatStr = nmea_buffer.substring(satIndex + 1, nextComma);
+                                if (realSatStr.length() > 0) {
+                                    logMessage("Real satellite count from GGA: " + realSatStr);
+                                }
+                            }
+                        }
+                    }
+   
+                    
+                    // Update timestamp for last real message
+                    lastRealMessageTime = now;
+                }
+                
+                // Clear buffer for next sentence
+                nmea_buffer = "";
+            }
+        } else {
+            // Add character to buffer
+            nmea_buffer += c;
+        }
+    }
+    
+    // Define a consistent satellite count to use across all messages
+    int satCount = gps.satellites.isValid() ? gps.satellites.value() : 8;
+    if (satCount < 4) satCount = 4; // Minimum for display
+    satCount = min(satCount, 12);   // Maximum realistic value
+    
+    // If we haven't received real GSV/GSA messages for a while, generate them
+    // This ensures the radio always has satellite data even if the GPS module
+    // temporarily doesn't provide it
+    bool useBackupMessages = (now - lastRealMessageTime > MSG_TIMEOUT) || 
+                            (!gsvReceived && !gsaReceived);
+    
+    if (useBackupMessages && (now - lastGSVTime >= GSV_INTERVAL)) {
+        logMessage("No real GPS messages received recently. Using backup data with sat count: " + String(satCount));
+        
+        // Generate GSV and GSA messages with consistent satellite count
+        generateBackupGSVMessages(gps, satCount);
+        generateBackupGSAMessage(gps, satCount);
+        
+        lastGSVTime = now;
+        
+        // Reset flags to allow trying for real data next time
+        gsvReceived = false;
+        gsaReceived = false;
+    }
+    
+    // Send GGA and RMC messages at regular intervals if not receiving them from GPS
     if (now - lastSendTime >= FORWARD_INTERVAL) {
         bool hasValidData = gps.location.isValid() && gps.time.isValid();
 
-        // Always send GGA message with consistent format
+        // Generate GGA message (Global Positioning System Fix Data)
         String ggaMessage = "$GPGGA,";
         
-        // Time field - always in same format
+        // Time field
         if (gps.time.isValid()) {
             // Format time as HHMMSS.SS
             String hour = String(gps.time.hour());
@@ -57,10 +137,10 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             if (gps.time.second() < 10) second = "0" + second;
             ggaMessage += hour + minute + second + ".00,";
         } else {
-            ggaMessage += "000000.00,";
+            ggaMessage += ","; // Empty field for unknown time
         }
 
-        // Position and quality fields - always in same format
+        // Position data
         if (gps.location.isValid()) {
             // Format latitude as DDMM.MMMM
             float lat = abs(gps.location.lat());
@@ -68,9 +148,10 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             float latMin = (lat - latDeg) * 60.0;
             String latDegStr = String(latDeg);
             if (latDeg < 10) latDegStr = "0" + latDegStr;
-            String latMinStr = String(latMin, 4);
-            while (latMinStr.length() < 7) latMinStr = "0" + latMinStr; // Ensure 4 decimal places
-            ggaMessage += latDegStr + latMinStr + (gps.location.lat() < 0 ? ",S," : ",N,");
+            
+            char latMinStr[10];
+            sprintf(latMinStr, "%07.4f", latMin); // Ensure 4 decimal places with leading zeros
+            ggaMessage += latDegStr + latMinStr + "," + (gps.location.lat() < 0 ? "S," : "N,");
 
             // Format longitude as DDDMM.MMMM
             float lng = abs(gps.location.lng());
@@ -79,39 +160,70 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             String lngDegStr = String(lngDeg);
             if (lngDeg < 100) lngDegStr = "0" + lngDegStr;
             if (lngDeg < 10) lngDegStr = "0" + lngDegStr;
-            String lngMinStr = String(lngMin, 4);
-            while (lngMinStr.length() < 7) lngMinStr = "0" + lngMinStr; // Ensure 4 decimal places
-            ggaMessage += lngDegStr + lngMinStr + (gps.location.lng() < 0 ? ",W," : ",E,");
+            
+            char lngMinStr[10];
+            sprintf(lngMinStr, "%07.4f", lngMin); // Ensure 4 decimal places with leading zeros
+            ggaMessage += lngDegStr + lngMinStr + "," + (gps.location.lng() < 0 ? "W," : "E,");
 
-            // Quality indicator (1 = GPS fix)
-            ggaMessage += "1,";
+            // Quality indicator and satellite count
+            ggaMessage += "1,"; // Fix quality: 1 = GPS fix
             
-            // Number of satellites
-            String sats = String(gps.satellites.value());
-            if (gps.satellites.value() < 10) sats = "0" + sats;
-            ggaMessage += sats + ",";
+            // Number of satellites - CRITICAL for satellite display
+            // Use the same satCount we're using in GSV/GSA messages for consistency
+            // Ensure the satellite count has 2 digits with leading zero if needed
+            String satString = String(satCount);
+            if (satCount < 10) satString = "0" + satString;
+            ggaMessage += satString + ",";
             
-            // HDOP
-            ggaMessage += String(gps.hdop.hdop(), 1) + ",";
+            // HDOP and altitude - CRITICAL for altitude display
+            if (gps.hdop.isValid()) {
+                char hdopStr[10];
+                sprintf(hdopStr, "%.1f", gps.hdop.hdop());
+                ggaMessage += String(hdopStr) + ",";
+            } else {
+                ggaMessage += "1.5,"; // Reasonable HDOP value
+            }
             
-            // Altitude
-            ggaMessage += String(gps.altitude.meters() + altitudeCorrection, 1) + ",M,";
+            // Altitude - must be properly formatted for ICOM display
+            if (gps.altitude.isValid()) {
+                char altStr[10];
+                sprintf(altStr, "%.1f", gps.altitude.meters() + altitudeCorrection);
+                ggaMessage += String(altStr) + ",M,";
+            } else {
+                ggaMessage += "0.0,M,"; // Use zero instead of empty for altitude
+            }
+            
+            // Height of geoid above WGS84
+            ggaMessage += "0.0,M,";
+            
+            // Time since last DGPS update and DGPS station ID
+            ggaMessage += ",,";
         } else {
-            ggaMessage += "0000.0000,N,00000.0000,W,0,00,0.0,0.0,M,";
+            // If location is invalid, use empty fields for coordinates
+            ggaMessage += ",,,,"; // Empty lat/lon fields
+            ggaMessage += "0,"; // Fix quality: 0 = Invalid
+            
+            // Satellite count - use the same value as in GSV/GSA
+            String satString = String(satCount);
+            if (satCount < 10) satString = "0" + satString;
+            ggaMessage += satString + ",";
+            
+            // HDOP, altitude, etc.
+            ggaMessage += "1.5,0.0,M,0.0,M,,";
         }
-        
-        // Remaining fields - always the same
-        ggaMessage += "0.0,M,,";
 
         // Calculate checksum
         uint8_t checksum = 0;
-        for (size_t i = 1; i < ggaMessage.length(); i++) checksum ^= ggaMessage[i];
+        for (size_t i = 1; i < ggaMessage.length(); i++) {
+            checksum ^= ggaMessage[i];
+        }
+        
         ggaMessage += "*";
         if (checksum < 16) ggaMessage += "0";
         ggaMessage += String(checksum, HEX);
-        ggaMessage += "\r\n"; // Explicit CRLF
+        ggaMessage += "\r\n";
         
-        // Send GGA message and track statistics
+        // Send GGA message
         radio.print(ggaMessage);
         ggaMessagesSent++;
         
@@ -121,16 +233,11 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
         } else {
             convertedMessages++;
         }
-        
-        // Also send to USB if USB mode is enabled
-        if (usbModeEnabled) {
-            Serial.print(ggaMessage);
-        }
 
-        // Always send RMC message with consistent format
+        // Send RMC message (Recommended Minimum Navigation Information)
         String rmcMessage = "$GPRMC,";
         
-        // Time field - always in same format
+        // Time field
         if (gps.time.isValid()) {
             // Format time as HHMMSS.SS
             String hour = String(gps.time.hour());
@@ -141,10 +248,10 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             if (gps.time.second() < 10) second = "0" + second;
             rmcMessage += hour + minute + second + ".00,";
         } else {
-            rmcMessage += "000000.00,";
+            rmcMessage += ","; // Empty time field
         }
 
-        // Status and position fields - always in same format
+        // Status and position fields
         if (gps.location.isValid()) {
             rmcMessage += "A,"; // Status (A = valid)
             
@@ -154,9 +261,10 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             float latMin = (lat - latDeg) * 60.0;
             String latDegStr = String(latDeg);
             if (latDeg < 10) latDegStr = "0" + latDegStr;
-            String latMinStr = String(latMin, 4);
-            while (latMinStr.length() < 7) latMinStr = "0" + latMinStr; // Ensure 4 decimal places
-            rmcMessage += latDegStr + latMinStr + (gps.location.lat() < 0 ? ",S," : ",N,");
+            
+            char latMinStr[10];
+            sprintf(latMinStr, "%07.4f", latMin); // Ensure 4 decimal places with leading zeros
+            rmcMessage += latDegStr + latMinStr + "," + (gps.location.lat() < 0 ? "S," : "N,");
 
             // Format longitude as DDDMM.MMMM
             float lng = abs(gps.location.lng());
@@ -165,15 +273,24 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             String lngDegStr = String(lngDeg);
             if (lngDeg < 100) lngDegStr = "0" + lngDegStr;
             if (lngDeg < 10) lngDegStr = "0" + lngDegStr;
-            String lngMinStr = String(lngMin, 4);
-            while (lngMinStr.length() < 7) lngMinStr = "0" + lngMinStr; // Ensure 4 decimal places
-            rmcMessage += lngDegStr + lngMinStr + (gps.location.lng() < 0 ? ",W," : ",E,");
+            
+            char lngMinStr[10];
+            sprintf(lngMinStr, "%07.4f", lngMin); // Ensure 4 decimal places with leading zeros
+            rmcMessage += lngDegStr + lngMinStr + "," + (gps.location.lng() < 0 ? "W," : "E,");
 
             // Speed
+            if (gps.speed.isValid()) {
             rmcMessage += String(gps.speed.knots(), 1) + ",";
+            } else {
+                rmcMessage += "0.0,"; // Zero speed if invalid
+            }
             
             // Course
+            if (gps.course.isValid()) {
             rmcMessage += String(gps.course.deg(), 1) + ",";
+            } else {
+                rmcMessage += "0.0,"; // Zero course if invalid
+            }
             
             // Date
             if (gps.date.isValid()) {
@@ -186,24 +303,46 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
                 if ((gps.date.year() % 100) < 10) year = "0" + year;
                 rmcMessage += day + month + year + ",";
             } else {
-                rmcMessage += "010100,";
+                // Use current date if unavailable
+                rmcMessage += "010123,"; // January 1, 2023 as fallback
             }
+            
+            // Magnetic variation (typically not available)
+            rmcMessage += ",";
+            
+            // Mode indicator (added in NMEA 2.3)
+            rmcMessage += "A";
         } else {
-            rmcMessage += "V,0000.0000,N,00000.0000,W,0.0,0.0,010100,";
+            rmcMessage += "V,"; // V = Navigation receiver warning
+            
+            // Empty position fields
+            rmcMessage += ",,,,"; // Lat/Lon empty
+            
+            // Speed and course - zero values
+            rmcMessage += "0.0,0.0,";
+            
+            // Date - use fallback
+            rmcMessage += "010123,";
+            
+            // Magnetic variation
+            rmcMessage += ",";
+            
+            // Mode indicator
+            rmcMessage += "N"; // N = Data not valid
         }
-        
-        // Remaining fields - always the same
-        rmcMessage += "0.0,E";
 
         // Calculate checksum
         checksum = 0;
-        for (size_t i = 1; i < rmcMessage.length(); i++) checksum ^= rmcMessage[i];
+        for (size_t i = 1; i < rmcMessage.length(); i++) {
+            checksum ^= rmcMessage[i];
+        }
+        
         rmcMessage += "*";
         if (checksum < 16) rmcMessage += "0";
         rmcMessage += String(checksum, HEX);
-        rmcMessage += "\r\n"; // Explicit CRLF
+        rmcMessage += "\r\n";
         
-        // Send RMC message and track statistics
+        // Send RMC message
         radio.print(rmcMessage);
         rmcMessagesSent++;
         
@@ -214,26 +353,16 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
             convertedMessages++;
         }
         
-        // Also send to USB if USB mode is enabled
-        if (usbModeEnabled) {
-            Serial.print(rmcMessage);
-        }
-
         lastSendTime = now;
     }
 
-    // Check for non-standard messages (e.g., GMEA) and convert if needed
+    // Check for non-standard messages from the radio
     while (radio.available()) {
         String line = radio.readStringUntil('\n');
         line.trim();
         if (line.startsWith("$GMEA")) {
             logMessage("Received non-standard GMEA: " + line);
             messageErrors++;
-            
-            // Also forward to USB if USB mode is enabled
-            if (usbModeEnabled) {
-                Serial.println(line);
-            }
         }
     }
 
@@ -241,138 +370,126 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
     reportGPSStats();
 }
 
-// New method to forward NMEA data to USB port
-void ICOM7100Configurator::forwardNMEAToUSB(TinyGPSPlus& gps, int altitudeCorrection) {
-    static unsigned long lastSendTime = 0;
-    const unsigned long FORWARD_INTERVAL = 500; // 2Hz
-
-    unsigned long now = millis();
-    if (now - lastSendTime >= FORWARD_INTERVAL) {
-        // Always send GGA message
-        String ggaMessage = "$GPGGA,";
-        if (gps.time.isValid()) {
-            // Format time as HHMMSS.SS
-            ggaMessage += String(gps.time.hour(), DEC);
-            if (gps.time.hour() < 10) ggaMessage += "0";
-            ggaMessage += String(gps.time.minute(), DEC);
-            if (gps.time.minute() < 10) ggaMessage += "0";
-            ggaMessage += String(gps.time.second(), DEC);
-            if (gps.time.second() < 10) ggaMessage += "0";
-            ggaMessage += ".00,";
-        } else {
-            ggaMessage += ",,,";
+// Helper method to generate backup GSV messages with dummy data
+void ICOM7100Configurator::generateBackupGSVMessages(TinyGPSPlus& gps, int satCount) {
+    // Use the provided satCount parameter passed from the caller
+    // This ensures consistency across all messages
+    
+    // Calculate how many messages are needed (max 4 satellites per message)
+    int numMessages = (satCount + 3) / 4; // Ceiling division
+    
+    // Generate GSV messages - each can contain up to 4 satellites
+    for (int msgNum = 1; msgNum <= numMessages; msgNum++) {
+        String gsvMessage = "$GPGSV," + String(numMessages) + "," + String(msgNum) + "," + String(satCount);
+        
+        // Calculate satellite range for this message
+        int startSat = (msgNum - 1) * 4;
+        int endSat = min(startSat + 3, satCount - 1);
+        
+        // Add 4 satellites (or fewer for the last message)
+        for (int i = startSat; i <= endSat; i++) {
+            // PRN ranging from 1-32 for GPS
+            int prn = i + 1;
+            if (prn > 32) prn = prn - 32; // Wrap around if we exceed 32
+            
+            // Need to include actual values for elevation, azimuth, and SNR
+            // Using simple patterns to distribute satellites around sky view
+            int elevation = 15 + (i * 5) % 75; // 15-90 degrees elevation
+            int azimuth = (i * 30) % 360;      // 0-359 degrees azimuth
+            int snr = 20 + (i * 3) % 30;       // 20-50 dB SNR (reasonable values)
+            
+            // Format: ,PRN,elevation,azimuth,SNR
+            gsvMessage += "," + String(prn);
+            
+            // Only include 2 digits for values (NMEA standard)
+            gsvMessage += "," + String(elevation);
+            gsvMessage += "," + String(azimuth);
+            gsvMessage += "," + String(snr);
         }
-
-        if (gps.location.isValid()) {
-            // Format latitude as DDMM.MMMM
-            float lat = abs(gps.location.lat());
-            int latDeg = (int)lat;
-            float latMin = (lat - latDeg) * 60.0;
-            ggaMessage += String(latDeg, DEC);
-            if (latDeg < 10) ggaMessage += "0";
-            ggaMessage += String(latMin, 4) + (gps.location.lat() < 0 ? "S," : "N,");
-
-            // Format longitude as DDDMM.MMMM
-            float lng = abs(gps.location.lng());
-            int lngDeg = (int)lng;
-            float lngMin = (lng - lngDeg) * 60.0;
-            ggaMessage += String(lngDeg, DEC);
-            if (lngDeg < 100) ggaMessage += "0";
-            if (lngDeg < 10) ggaMessage += "0";
-            ggaMessage += String(lngMin, 4) + (gps.location.lng() < 0 ? "W," : "E,");
-
-            ggaMessage += "1,"; // Fix quality
-            ggaMessage += String(gps.satellites.value()) + ",";
-            ggaMessage += String(gps.hdop.hdop(), 1) + ",";
-            ggaMessage += String(gps.altitude.meters() + altitudeCorrection, 1) + ",M,";
-        } else {
-            ggaMessage += ",,,,,,,";
-        }
-        ggaMessage += "0.0,M,,";
-
+        
         // Calculate checksum
         uint8_t checksum = 0;
-        for (size_t i = 1; i < ggaMessage.length(); i++) checksum ^= ggaMessage[i];
-        ggaMessage += "*";
-        if (checksum < 16) ggaMessage += "0";
-        ggaMessage += String(checksum, HEX);
-        ggaMessage += "\r\n"; // Explicit CRLF
-        Serial.print(ggaMessage);  // Send to USB serial port
-
-        // Always send RMC message
-        String rmcMessage = "$GPRMC,";
-        if (gps.time.isValid()) {
-            // Format time as HHMMSS.SS
-            rmcMessage += String(gps.time.hour(), DEC);
-            if (gps.time.hour() < 10) rmcMessage += "0";
-            rmcMessage += String(gps.time.minute(), DEC);
-            if (gps.time.minute() < 10) rmcMessage += "0";
-            rmcMessage += String(gps.time.second(), DEC);
-            if (gps.time.second() < 10) rmcMessage += "0";
-            rmcMessage += ".00,";
-        } else {
-            rmcMessage += ",,,";
+        for (size_t i = 1; i < gsvMessage.length(); i++) {
+            checksum ^= gsvMessage[i];
         }
-
-        if (gps.location.isValid()) {
-            rmcMessage += "A,"; // Status
-            // Format latitude as DDMM.MMMM
-            float lat = abs(gps.location.lat());
-            int latDeg = (int)lat;
-            float latMin = (lat - latDeg) * 60.0;
-            rmcMessage += String(latDeg, DEC);
-            if (latDeg < 10) rmcMessage += "0";
-            rmcMessage += String(latMin, 4) + (gps.location.lat() < 0 ? "S," : "N,");
-
-            // Format longitude as DDDMM.MMMM
-            float lng = abs(gps.location.lng());
-            int lngDeg = (int)lng;
-            float lngMin = (lng - lngDeg) * 60.0;
-            rmcMessage += String(lngDeg, DEC);
-            if (lngDeg < 100) rmcMessage += "0";
-            if (lngDeg < 10) rmcMessage += "0";
-            rmcMessage += String(lngMin, 4) + (gps.location.lng() < 0 ? "W," : "E,");
-
-            rmcMessage += String(gps.speed.knots(), 1) + ",";
-            rmcMessage += String(gps.course.deg(), 1) + ",";
-            if (gps.date.isValid()) {
-                // Format date as DDMMYY
-                rmcMessage += String(gps.date.day(), DEC);
-                if (gps.date.day() < 10) rmcMessage += "0";
-                rmcMessage += String(gps.date.month(), DEC);
-                if (gps.date.month() < 10) rmcMessage += "0";
-                rmcMessage += String(gps.date.year() % 100, DEC);
-            } else {
-                rmcMessage += ",,,";
-            }
-        } else {
-            rmcMessage += "V,,,,,,,,,";
-        }
-        rmcMessage += "0.0,E,";
-
-        // Calculate checksum
-        checksum = 0;
-        for (size_t i = 1; i < rmcMessage.length(); i++) checksum ^= rmcMessage[i];
-        rmcMessage += "*";
-        if (checksum < 16) rmcMessage += "0";
-        rmcMessage += String(checksum, HEX);
-        rmcMessage += "\r\n"; // Explicit CRLF
-        Serial.print(rmcMessage);  // Send to USB serial port
-
-        lastSendTime = now;
+        
+        gsvMessage += "*";
+        if (checksum < 16) gsvMessage += "0";
+        gsvMessage += String(checksum, HEX);
+        gsvMessage += "\r\n";
+        
+        // Send GSV message
+        radio.print(gsvMessage);
     }
+    
+    logMessage("Generated " + String(numMessages) + " backup GSV messages with sat count: " + String(satCount));
 }
 
-// USB Mode enabler
-void ICOM7100Configurator::enableUSBMode(bool enable) {
-    usbModeEnabled = enable;
-    logMessage("USB mode " + String(enable ? "enabled" : "disabled"));
+// Helper method to generate backup GSA message with dummy data
+void ICOM7100Configurator::generateBackupGSAMessage(TinyGPSPlus& gps, int satCount) {
+    // Use the provided satCount parameter passed from the caller
+    // This ensures consistency across all messages
+    
+    // Add a GSA message - GPS DOP and active satellites
+    // A=Auto 2D/3D selection, M=Manual, 1=No fix, 2=2D fix, 3=3D fix
+    String gsaMessage = "$GPGSA,A,3,"; // A=Auto, 3=3D fix
+    
+    // Include up to 12 PRNs in GSA message
+    // These should match the PRNs we're using in the GSV messages
+    int maxSatsInGSA = min(satCount, 12); // GSA message can include up to 12 satellites
+    
+    // Add PRN numbers for the satellites used in fix
+    for (int i = 0; i < 12; i++) {
+        if (i < maxSatsInGSA) {
+            // Use same PRN calculation as in GSV messages
+            int prn = i + 1;
+            if (prn > 32) prn = prn - 32; // Wrap around if we exceed 32
+            
+            // Format PRN with leading zero if needed
+            if (prn < 10) {
+                gsaMessage += "0";
+            }
+            gsaMessage += String(prn) + ",";
+    } else {
+            // Empty field for unused satellite slots
+            gsaMessage += ",";
+    }
+    }
+    
+    // Calculate realistic DOP values based on number of satellites
+    // More satellites = better DOP values
+    float pdopBase = 5.0;
+    float hdopBase = 2.5;
+    float vdopBase = 4.0;
+    
+    float satFactor = 1.0 - (min(satCount, 12) / 24.0); // 0.5 to 0.83 depending on sats
+    float pdop = pdopBase * satFactor;
+    float hdop = hdopBase * satFactor;
+    float vdop = vdopBase * satFactor;
+    
+    // Format to one decimal place
+    char dopStr[30];
+    sprintf(dopStr, "%.1f,%.1f,%.1f", pdop, hdop, vdop);
+    gsaMessage += dopStr;
+    
+    // Calculate checksum
+    uint8_t checksum = 0;
+    for (size_t i = 1; i < gsaMessage.length(); i++) {
+        checksum ^= gsaMessage[i];
+    }
+    
+    gsaMessage += "*";
+    if (checksum < 16) gsaMessage += "0";
+    gsaMessage += String(checksum, HEX);
+    gsaMessage += "\r\n";
+    
+    // Send GSA message
+    radio.print(gsaMessage);
+    
+    logMessage("Generated backup GSA message with " + String(maxSatsInGSA) + " satellites");
 }
 
-// USB Mode getter
-bool ICOM7100Configurator::isUSBModeEnabled() const {
-    return usbModeEnabled;
-}
+
 
 // Basic Commands
 void ICOM7100Configurator::setFrequency(unsigned long freq) {
@@ -472,10 +589,6 @@ bool ICOM7100Configurator::queryStatus() {
     uint8_t statusCmd[] = {0xFE, 0xFE, 0x88, 0xE0, 0x03, 0xFD};
     radio.write(statusCmd, sizeof(statusCmd));
     
-    // Also send to USB if USB mode is enabled
-    if (usbModeEnabled) {
-        Serial.write(statusCmd, sizeof(statusCmd));
-    }
     
     // Wait for response
     delay(100);
@@ -509,7 +622,7 @@ bool ICOM7100Configurator::queryStatus() {
 // Initialize radio with default settings
 void ICOM7100Configurator::initialize() {
     // Set default GPS baud rate to match our GPS module
-    setGPSBaudRate(4800);
+    setGPSBaudRate(9600);
     
     // Enable GPS display
     enableGPSDisplay();
@@ -522,9 +635,7 @@ void ICOM7100Configurator::initialize() {
 
     // Enable GPS-A functionality
     enableGPSA();
-    
-    // USB mode is disabled by default (set in constructor)
-    logMessage("Radio initialized. USB mode: " + String(usbModeEnabled ? "ON" : "OFF"));
+
 }
 
 void ICOM7100Configurator::reportGPSStats() {
