@@ -77,4 +77,18 @@ public:
     void initialize();
 };
 
+// UsbRadio: Handles CAT/DV data over USB CDC for ICOM 7100
+class UsbRadio {
+public:
+    UsbRadio(HardwareSerial& radioUart);
+    void begin();
+    void loop(); // Call in main loop to bridge USB CDC <-> radio UART
+    void sendCATCommand(const uint8_t* data, size_t len);
+    void sendDVData(const uint8_t* data, size_t len);
+    bool isConnected(); // New method
+    // Optionally, add callbacks for received data
+private:
+    HardwareSerial& radio;
+};
+
 #endif // ICOM7100_CONFIGURATOR_H 

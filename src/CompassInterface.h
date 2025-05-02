@@ -5,6 +5,7 @@
 #include <QMC5883LCompass.h>
 #include <Adafruit_HMC5883_U.h>
 #include <Adafruit_Sensor.h>
+#include <Preferences.h>
 
 /**
  * @brief Abstract interface for compass/magnetometer sensors
