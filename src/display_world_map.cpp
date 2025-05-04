@@ -88,7 +88,7 @@ void displayWorldMap() {
 
   int posX = 0, posY = 0;
   display.clearBuffer();
-  display.drawXBMP(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, world_map);
+  display.drawXBM(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, world_map);
   if (gps.location.isValid()) {
     float lat = getLatitude();
     float lng = getLongitude();
