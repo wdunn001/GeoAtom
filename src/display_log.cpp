@@ -3,6 +3,7 @@
 #include <vector>
 #include "display_manager.h"
 #include "main_globals.h"
+extern U8G2_SSD1306_128X64_NONAME_F_HW_I2C display;
 
 // Externs for globals used in these functions
 extern bool display_initialized;
@@ -10,20 +11,20 @@ extern std::vector<String> log_buffer;
 extern int currentLogIndex;
 extern DisplayMode currentDisplayMode;
 extern void logMessage(const String& msg);
-extern bool radioUsbMode;
 
 void displayLogMessages() {
   if (!display_initialized) return;
 
   display.clearDisplay();
-  display.setFont(u8g2_font_ncenB08_tr);
-  display.setDrawColor(1);
+  setDisplayTitleStyle();
 
   // Center the title
   String title = "--- Error Log ---";
   int titleWidth = display.getStrWidth(title.c_str());
   display.setCursor((SCREEN_WIDTH - titleWidth) / 2, 0);
   display.println(title);
+
+  setDisplayDefaultStyle();
 
   // Handle empty log buffer
   if (log_buffer.empty()) {

@@ -23,7 +23,7 @@ void displayGraphicCompass() {
 
   int w = 0;
   display.clearBuffer();
-  display.setFont(u8g2_font_ncenB08_tr);
+  setDisplayDefaultStyle();
 
   int centerX = SCREEN_WIDTH / 2;
   int centerY = SCREEN_HEIGHT / 2;
@@ -56,10 +56,20 @@ void displayGraphicCompass() {
     
     display.drawDisc(centerX, centerY, 2);
     
-    display.drawStr(centerX - 2, centerY - radius - 7, "N");
-    display.drawStr(centerX - 2, centerY + radius + 1, "S");
-    display.drawStr(centerX + radius + 2, centerY - 3, "E");
-    display.drawStr(centerX - radius - 7, centerY - 3, "W");
+    // Draw N S E W labels, centered
+    int nWidth = display.getStrWidth("N");
+    int sWidth = display.getStrWidth("S");
+    int eWidth = display.getStrWidth("E");
+    int wWidth = display.getStrWidth("W");
+    int fontHeight = 8; // Assuming 8px font height
+    // North (top center)
+    display.drawStr(centerX - nWidth / 2, centerY - radius - 2, "N");
+    // South (bottom center)
+    display.drawStr(centerX - sWidth / 2, centerY + radius + fontHeight, "S");
+    // East (right center)
+    display.drawStr(centerX + radius + 4, centerY + fontHeight / 2, "E");
+    // West (left center)
+    display.drawStr(centerX - radius - wWidth - 4, centerY + fontHeight / 2, "W");
   } else {
     display.drawStr(centerX - 8, centerY - 4, "ERR");
   }
@@ -102,27 +112,25 @@ void displayGraphicCompass() {
     }
   }
   
-  // Draw GPS coordinates or 'No Fix' using a single w variable
+  // Draw GPS coordinates at the bottom
   if (gps.location.isValid()) {
-    float lat = getLatitude(); 
+    float lat = getLatitude();
     float lng = getLongitude();
-    display.drawStr(0, 30, "Lat");
-    display.drawStr(0, 40, String(lat, 5).c_str());
-    String lngLabel = "Lng";
-    w = display.getStrWidth(lngLabel.c_str());
-    display.drawStr(SCREEN_WIDTH - w, 30, lngLabel.c_str());
-    String lngValue = String(lng, 5);
-    w = display.getStrWidth(lngValue.c_str());
-    display.drawStr(SCREEN_WIDTH - w, 40, lngValue.c_str());
+    String latStr = String("Lat ") + String(lat, 5);
+    String lngStr = String("Lng ") + String(lng, 5);
+    int latY = SCREEN_HEIGHT - 2;
+    int lngY = SCREEN_HEIGHT - 2;
+    display.drawStr(0, latY, latStr.c_str());
+    int lngWidth = display.getStrWidth(lngStr.c_str());
+    display.drawStr(SCREEN_WIDTH - lngWidth, lngY, lngStr.c_str());
   } else {
-    display.drawStr(0, 30, "Lat");
-    display.drawStr(0, 40, "No Fix");
-    String lngLabel = "Lng";
-    w = display.getStrWidth(lngLabel.c_str());
-    display.drawStr(SCREEN_WIDTH - w, 30, lngLabel.c_str());
-    String noFix = "No Fix";
-    w = display.getStrWidth(noFix.c_str());
-    display.drawStr(SCREEN_WIDTH - w, 40, noFix.c_str());
+    String latStr = "Lat No Fix";
+    String lngStr = "Lng No Fix";
+    int latY = SCREEN_HEIGHT - 2;
+    int lngY = SCREEN_HEIGHT - 2;
+    display.drawStr(0, latY, latStr.c_str());
+    int lngWidth = display.getStrWidth(lngStr.c_str());
+    display.drawStr(SCREEN_WIDTH - lngWidth, lngY, lngStr.c_str());
   }
   
   // Draw privacy indicator if privacy mode is enabled

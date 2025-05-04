@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "display_manager.h"
 #include "main_globals.h"
+extern U8G2_SSD1306_128X64_NONAME_F_HW_I2C display;
 
 extern bool display_initialized;
 extern CompassInterface* activeCompass;
@@ -57,8 +58,7 @@ void displayCompassStatusOnOLED() {
   lastUpdateTime = millis();
 
   display.clearDisplay();
-  display.setFont(u8g2_font_ncenB08_tr);
-  display.setDrawColor(1);
+  setDisplayDefaultStyle();
 
   // Only show calibration mode selection and multi-point calibration for QMC5883L
   if (isSelectingCalibrationMode && activeCompass == &qmcCompass) {
@@ -181,9 +181,11 @@ void displayCompassStatusOnOLED() {
   else {
     // Normal Compass Status Screen
     String title = "-- Compass Status --";
+    setDisplayTitleStyle();
     int titleWidth = display.getStrWidth(title.c_str());
     display.setCursor((SCREEN_WIDTH - titleWidth) / 2, 0);
     display.println(title);
+    setDisplayDefaultStyle();
     
     if (activeCompass != nullptr) {
       // Display compass type on first line
@@ -259,8 +261,8 @@ void displayCompassStatusOnOLED() {
 }
 
 void handleShortPressCompassStatus() {
-    currentDisplayMode = DisplayMode::RADIO_STATUS;
-    logMessage("Display mode changed to: RADIO_STATUS");
+    currentDisplayMode = DisplayMode::WIFI_STATUS;
+    logMessage("Display mode changed to: WIFI_STATUS");
 }
 
 void handleLongPressCompassStatus() {

@@ -1,6 +1,22 @@
 #include "display_manager.h"
 #include <map>
 #include <U8g2lib.h>
+#include "display_gps_status.h"
+#include "display_compass_status.h"
+#include "display_graphic_compass.h"
+#include "display_world_map.h"
+#include "display_wifi_status.h"
+#include "display_radio_status.h"
+#include "display_log.h"
+
+// Forward declarations in case headers do not provide them
+void displayGPSStatusOnOLED();
+void displayCompassStatusOnOLED();
+void displayGraphicCompass();
+void displayWorldMap();
+void displayWiFiStatus();
+void displayRadioStatus();
+void displayLogMessages();
 
 // Externs for state flags and display mode
 extern bool isSettingAltitudeCorrection;
@@ -37,8 +53,8 @@ extern void handleLongPressRadioSettings();
 extern void handleDoubleClickRadioSettings();
 extern void handleShortPressRadioStatus();
 extern void handleLongPressRadioStatus();
-extern void handleShortPressBLEStatus();
-extern void handleLongPressBLEStatus();
+// extern void handleShortPressBLEStatus();
+// extern void handleLongPressBLEStatus();
 
 extern U8G2_SSD1306_128X64_NONAME_F_HW_I2C display;
 
@@ -56,10 +72,8 @@ void setupButtonHandlers() {
   buttonHandlerMap[UIState::CALIBRATING_COMPASS] = ButtonHandlers{handleShortPressCalibrating, handleLongPressCalibrating, nullptr};
   buttonHandlerMap[UIState::SETTING_DECLINATION] = ButtonHandlers{handleShortPressDeclination, handleLongPressDeclination, nullptr};
   buttonHandlerMap[UIState::SETTING_INVERSION] = ButtonHandlers{handleShortPressInversion, handleLongPressInversion, nullptr};
-  buttonHandlerMap[UIState::LOG_DISPLAY] = ButtonHandlers{handleShortPressLogDisplay, handleLongPressLogDisplay, nullptr};
-  buttonHandlerMap[UIState::RADIO_SETTINGS_SCREEN] = ButtonHandlers{handleShortPressRadioSettings, handleLongPressRadioSettings, handleDoubleClickRadioSettings};
   buttonHandlerMap[UIState::RADIO_STATUS_SCREEN] = ButtonHandlers{handleShortPressRadioStatus, handleLongPressRadioStatus, nullptr};
-  buttonHandlerMap[UIState::BLE_STATUS_SCREEN] = ButtonHandlers{handleShortPressBLEStatus, handleLongPressBLEStatus, nullptr};
+  // buttonHandlerMap[UIState::BLE_STATUS_SCREEN] = ButtonHandlers{handleShortPressBLEStatus, handleLongPressBLEStatus, nullptr};
 }
 
 UIState determineCurrentUIState() {
@@ -96,14 +110,8 @@ UIState determineCurrentUIState() {
       case DisplayMode::LOG_DISPLAY:
         detectedState = UIState::LOG_DISPLAY;
         break;
-      case DisplayMode::RADIO_SETTINGS:
-        detectedState = UIState::RADIO_SETTINGS_SCREEN;
-        break;
       case DisplayMode::RADIO_STATUS:
         detectedState = UIState::RADIO_STATUS_SCREEN;
-        break;
-      case DisplayMode::BLE_STATUS:
-        detectedState = UIState::BLE_STATUS_SCREEN;
         break;
       default:
         detectedState = UIState::GRAPHIC_COMPASS_SCREEN;
@@ -111,4 +119,43 @@ UIState determineCurrentUIState() {
     }
   }
   return detectedState;
+}
+
+// Centralized display style functions
+void setDisplayDefaultStyle() {
+    display.setFont(u8g2_font_5x8_mr);
+    display.setDrawColor(1);
+}
+
+void setDisplayTitleStyle() {
+    // You can use a bolder or larger font here if desired, or keep it the same for now
+    display.setFont(u8g2_font_5x8_mr);
+    display.setDrawColor(1);
+}
+
+UIState getCurrentUIState() {
+    return determineCurrentUIState();
+}
+
+void updateDisplayForCurrentMode() {
+    switch (currentDisplayMode) {
+        case DisplayMode::GPS_STATUS:
+            displayGPSStatusOnOLED();
+            break;
+        case DisplayMode::COMPASS_STATUS:
+            displayCompassStatusOnOLED();
+            break;
+        case DisplayMode::GRAPHIC_COMPASS:
+            displayGraphicCompass();
+            break;
+        case DisplayMode::WORLD_MAP:
+            displayWorldMap();
+            break;
+        case DisplayMode::WIFI_STATUS:
+            displayWiFiStatus();
+            break;
+        default:
+            displayGraphicCompass();
+            break;
+    }
 } 

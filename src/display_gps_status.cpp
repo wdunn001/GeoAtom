@@ -24,12 +24,14 @@ void displayGPSStatusOnOLED() {
   if (!display_initialized) return;
 
   display.clearBuffer();
-  display.setFont(u8g2_font_ncenB08_tr);
+  setDisplayTitleStyle();
 
   // Center the title
   String title = "--- GPS Status ---";
   int16_t x = (128 - display.getStrWidth(title.c_str())) / 2;
   display.drawStr(x, 10, title.c_str());
+
+  setDisplayDefaultStyle();
 
   // Use static variables to hold the protocol string and its last update time
   static String displayedGpsProtocol = "Initializing...";
