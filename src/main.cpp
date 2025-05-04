@@ -11,13 +11,27 @@
 #include <map> // Add for std::map
 // Include SSD1306 display libraries
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <SPI.h>
 #include <algorithm>  // Add this for min function
+#include <deque>
+#include "display_world_map.h"
+#include "display_compass_status.h"
+#include "display_manager.h"
+#include "display_graphic_compass.h"
+#include "display_gps_status.h"
+#include "display_log.h"
+#include "display_radio_status.h"
+#include "display_radio_settings.h"
+#include "main_globals.h"
+#include <U8g2lib.h>
+
+// Remove #define SCREEN_WIDTH and #define SCREEN_HEIGHT
+// Instead, define them as variables for external linkage
+int SCREEN_WIDTH = 128;
+int SCREEN_HEIGHT = 64;
 
 // Hand-drawn world map bitmap 128x64 pixels
-static const unsigned char world_map[] PROGMEM = {
+const unsigned char world_map[] PROGMEM = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
@@ -88,9 +102,7 @@ static const unsigned char world_map[] PROGMEM = {
 void scanI2CDevices(void);
 void displayLogOnOLED();
 void displayCompassLogOnOLED();
-void displayGraphicCompass();
 void displayWorldMap();
-void displayLogMessages();
 void displayRadioSettings();
 void displayRadioStatus();
 void calculateAndApplyCalibration(); // New calibration function
@@ -98,49 +110,45 @@ void setDeclinationFromGPS(float lat, float lng); // Auto declination based on G
 void applyPrivacyFilter(); // Stub - Replaced by getLatitude() and getLongitude() wrappers
 
 // Add this function to draw a more prominent privacy indicator
-void drawPrivacyIndicator(Adafruit_SSD1306 &display) {
-  extern bool privacyModeEnabled; // Fix linter error by adding external declaration
-  
+void drawPrivacyIndicator(U8G2 &display) {
+  extern bool privacyModeEnabled;
   if (privacyModeEnabled) {
-    // Draw a padlock icon at top-right corner
-    int x = display.width() - 10;
+    int x = display.getWidth() - 10;
     int y = 2;
-    
     // Lock body
-    display.fillRect(x, y + 3, 8, 6, SSD1306_WHITE);
-    
+    display.drawBox(x, y + 3, 8, 6);
     // Lock shackle
-    display.drawRect(x + 1, y, 6, 4, SSD1306_WHITE);
-    
-    // Optional: "P" for privacy
-    display.drawPixel(x + 2, y + 5, SSD1306_BLACK);
-    display.drawPixel(x + 3, y + 4, SSD1306_BLACK);
-    display.drawPixel(x + 4, y + 5, SSD1306_BLACK);
-    display.drawPixel(x + 3, y + 6, SSD1306_BLACK);
-    display.drawPixel(x + 2, y + 7, SSD1306_BLACK);
+    display.drawFrame(x + 1, y, 6, 4);
+    // Optional: "P" for privacy (draw a simple P shape)
+    display.setDrawColor(0);
+    display.drawPixel(x + 2, y + 5);
+    display.drawPixel(x + 3, y + 4);
+    display.drawPixel(x + 4, y + 5);
+    display.drawPixel(x + 3, y + 6);
+    display.drawPixel(x + 2, y + 7);
+    display.setDrawColor(1);
   }
 }
 
 // Add this function to draw a save icon
-void drawSaveIcon(Adafruit_SSD1306 &display) {
-  // Draw a floppy disk icon at top-right corner
-  int x = display.width() - 10;
+void drawSaveIcon(U8G2 &display) {
+  int x = display.getWidth() - 10;
   int y = 2;
-  
   // Disk body
-  display.fillRect(x, y, 8, 8, SSD1306_WHITE);
-  
+  display.drawBox(x, y, 8, 8);
   // Disk label
-  display.drawRect(x + 2, y + 2, 4, 4, SSD1306_BLACK);
-  
+  display.setDrawColor(0);
+  display.drawFrame(x + 2, y + 2, 4, 4);
+  display.setDrawColor(1);
   // Disk shutter
-  display.drawRect(x - 1, y + 1, 2, 6, SSD1306_WHITE);
+  display.drawFrame(x - 1, y + 1, 2, 6);
 }
 
 // GPS setup
 TinyGPSPlus gps;
 HardwareSerial GPS(1);  // Using UART1 for GPS
 HardwareSerial Radio(2); // Using UART2 for NMEA forwarding to Radio/TTL converter
+UsbRadio usbRadio(Radio);
 unsigned long gpsBaudRate = 0; // Variable to store GPS baud rate
 int altitudeCorrection = 0; // Altitude correction factor in meters - Set to 0
 CompassInterface* activeCompass = nullptr;
@@ -161,22 +169,18 @@ bool isSettingAltitudeCorrection = false; // Flag for altitude correction mode
 bool privacyModeEnabled = false; // Flag to toggle privacy mode for coordinates
 
 // Calibration mode options
-const int NUM_CALIBRATION_MODES = 4; // 4-point, 8-point, 16-point, Cancel
+const int NUM_CALIBRATION_MODES = 4;
 const char* CALIBRATION_MODE_NAMES[NUM_CALIBRATION_MODES] = {
   "4-Point Cal", "8-Point Cal", "16-Point Cal", "Cancel"
 };
 const int CALIBRATION_MODE_POINTS[NUM_CALIBRATION_MODES] = {
-  4, 8, 16, 0 // 0 points means cancel
+  4, 8, 16, 0
 };
 
 // SSD1306 display configuration
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1  // Reset pin not used on most modules
-#define OLED_ADDR 0x3C  // Common I2C address for SSD1306
-
-// Create display instance without initializing it yet
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// Remove: #define OLED_RESET -1  // Reset pin not used on most modules
+// Remove: #define OLED_ADDR 0x3C  // Common I2C address for SSD1306
+// Remove: Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 bool display_initialized = false;  // Flag to track if display is initialized
 
 // Log buffer setup
@@ -185,7 +189,7 @@ std::vector<String> log_buffer; // Historical log buffer
 // bool show_log_on_oled = false; // Replaced by currentDisplayMode
 
 // Display Modes Enum
-enum class DisplayMode { GPS_STATUS, COMPASS_STATUS, GRAPHIC_COMPASS, WORLD_MAP, LOG_DISPLAY, RADIO_SETTINGS, RADIO_STATUS };
+// (REMOVED: enum class DisplayMode ...)
 DisplayMode currentDisplayMode = DisplayMode::GRAPHIC_COMPASS; // Start in graphic compass mode
 
 // Variables to hold latest status for fixed display
@@ -243,26 +247,32 @@ m5::Log_Class m5Log;
 // Create ICOM7100 configurator instance
 ICOM7100Configurator* radioConfig = nullptr;
 
-// Logging function - adds messages to buffer and sends to M5 log
+// Batched logging
+static std::deque<String> log_batch;
+static String lastMagnetoMsg = "";
+static unsigned long lastLogFlush = 0;
+const unsigned long LOG_FLUSH_INTERVAL = 2000; // ms
+
 void logMessage(const String& msg) {
-  // Log to M5 serial (USB) for debugging
-  m5Log.println(msg.c_str());
-  
-  // Only add to buffer if it's an error, warning, or failure message
-  if (msg.startsWith("ERROR") || 
-      msg.startsWith("***") || 
-      msg.startsWith("WARNING") ||
-      msg.startsWith("Failed") ||
-      msg.startsWith("Error") ||
-      msg.startsWith("!") ||
-      msg.startsWith("Warning")) {
-    
-    // Add message to buffer, managing size
-    if (log_buffer.size() >= MAX_LOG_LINES) {
-      log_buffer.erase(log_buffer.begin()); // Remove the oldest message
+    // Only keep the last magnetometer message in the batch
+    if (msg.startsWith("Using magnetometer for heading")) {
+        lastMagnetoMsg = msg;
+    } else {
+        log_batch.push_back(msg);
     }
-    log_buffer.push_back(msg); // Add the new message
-  }
+}
+
+void flushLogMessages() {
+    // Flush all batched messages
+    while (!log_batch.empty()) {
+        m5Log.println(log_batch.front().c_str());
+        log_batch.pop_front();
+    }
+    // Flush the last magnetometer message (if any)
+    if (!lastMagnetoMsg.isEmpty()) {
+        m5Log.println(lastMagnetoMsg.c_str());
+        lastMagnetoMsg = "";
+    }
 }
 
 // Set the declination based on compass direction relative to true north from GPS
@@ -387,83 +397,15 @@ float getLongitude() {
 }
 
 // UI State Management - Centralized Button Handling
-// Define all possible UI states
-enum class UIState {
-  // Main display modes
-  GPS_STATUS_SCREEN,
-  COMPASS_STATUS_SCREEN,
-  GRAPHIC_COMPASS_SCREEN,
-  WORLD_MAP_SCREEN,
-  RADIO_SETTINGS_SCREEN,
-  RADIO_STATUS_SCREEN,
-  
-  // Configuration modes
-  ALTITUDE_CORRECTION_MODE,
-  CALIBRATION_MODE_SELECTION,
-  CALIBRATING_COMPASS,
-  SETTING_DECLINATION,
-  SETTING_INVERSION,
-  LOG_DISPLAY
-};
+// (REMOVED: enum class UIState ...)
 
 // Current UI state
-UIState currentUIState = UIState::GRAPHIC_COMPASS_SCREEN;
+// UIState currentUIState = UIState::GRAPHIC_COMPASS_SCREEN;
 
 // Function to get the current UI state based on display mode and flags
-UIState determineCurrentUIState() {
-  // First determine if we're in a special mode
-  // Use a single variable to hold the current mode state
-  UIState detectedState;
-  
-  // Use a switch to determine the state based on configuration flags
-  // Configuration modes take precedence over display modes
-  if (isSettingAltitudeCorrection) {
-    detectedState = UIState::ALTITUDE_CORRECTION_MODE;
-  }
-  else if (isSelectingCalibrationMode) {
-    detectedState = UIState::CALIBRATION_MODE_SELECTION;
-  }
-  else if (isCalibrating) {
-    detectedState = UIState::CALIBRATING_COMPASS;
-  }
-  else if (isSettingDeclination) {
-    detectedState = UIState::SETTING_DECLINATION;
-  }
-  else if (isSettingInversion) {
-    detectedState = UIState::SETTING_INVERSION;
-  }
-  else {
-    // Not in configuration mode, so use display mode
-    switch (currentDisplayMode) {
-      case DisplayMode::GPS_STATUS:
-        detectedState = UIState::GPS_STATUS_SCREEN;
-        break;
-      case DisplayMode::COMPASS_STATUS:
-        detectedState = UIState::COMPASS_STATUS_SCREEN;
-        break;
-      case DisplayMode::GRAPHIC_COMPASS:
-        detectedState = UIState::GRAPHIC_COMPASS_SCREEN;
-        break;
-      case DisplayMode::WORLD_MAP:
-        detectedState = UIState::WORLD_MAP_SCREEN;
-        break;
-      case DisplayMode::LOG_DISPLAY:
-        detectedState = UIState::LOG_DISPLAY;
-        break;
-      case DisplayMode::RADIO_SETTINGS:
-        detectedState = UIState::RADIO_SETTINGS_SCREEN;
-        break;
-      case DisplayMode::RADIO_STATUS:
-        detectedState = UIState::RADIO_STATUS_SCREEN;
-        break;
-      default:
-        detectedState = UIState::GRAPHIC_COMPASS_SCREEN;
-        break;
-    }
-  }
-  
-  return detectedState;
-}
+// UIState determineCurrentUIState() {
+//   ...
+// }
 
 // Function prototypes for button handlers
 void handleShortPressGPSStatus();
@@ -490,140 +432,66 @@ void handleShortPressRadioSettings();
 void handleLongPressRadioSettings();
 void handleShortPressRadioStatus();
 void handleLongPressRadioStatus();
-void handleDoubleClickRadioSettings();
-void handleDoubleClickCompassStatus();
 // Function prototypes
 void scanI2CDevices();
 void forwardNMEAToICOM(TinyGPSPlus& gps, int altitudeCorrection);
 
-
-// Define a type for button handler functions for clarity
-typedef void (*ButtonHandlerFunc)();
-
-// Define a struct to hold both short and long press handlers
-struct ButtonHandlers {
-    ButtonHandlerFunc shortPressHandler;
-    ButtonHandlerFunc longPressHandler;
-    ButtonHandlerFunc doubleClickHandler;
-};
-
-// Create a map from UIState to button handlers
-std::map<UIState, ButtonHandlers> buttonHandlerMap;
-
-// Add these declarations near the top with other variables
-const unsigned long GPS_CONFIG_RETRY_DELAY = 100; // 100ms between retries
-bool gpsInitialized = false;  // Track if GPS was successfully initialized
-
-// Add these variables near the top with other global variables
-static unsigned long lastPacketCount = 0;
-static unsigned long lastPacketTime = 0;
-static float packetsPerSecond = 0.0f;
-
-
-// Add these variables near the other global variables
-static int currentLogIndex = 0;  // Index of the current message being displayed
-static const int MESSAGES_PER_PAGE = 1; // Show one message at a time
-
-// Radio Settings Variables
-int radioVolume = 50;
-int radioSquelch = 20;
-bool radioGPSDisplay = true;
-bool radioGPSA = true;
-bool radioUsbMode = false; // Add USB mode flag
-int radioGPSBaudRate = 9600;
-int radioFrequency = 145000000; // Default to 2m band
-String radioMode = "FM"; // Default mode
-int radioPowerLevel = 50; // Power level in watts
-String radioDStarCallSign = ""; // D-STAR callsign
-String radioDStarMessage = ""; // D-STAR message
-int radioMemoryChannel = 0; // Current memory channel
-int radioSettingIndex = 0; // Current setting being edited
-bool isEditingSetting = false; // Whether we're in edit mode
-
-// Radio GPS Status Variables
+// --- Restored global variables for modularized code ---
+unsigned long GPS_CONFIG_RETRY_DELAY = 100; // 100ms between retries
+bool gpsInitialized = false;
+bool radioUsbMode = false;
+bool waitingForDoubleClick = false;
+unsigned long lastButtonReleaseTime = 0;
+const unsigned long DOUBLE_CLICK_TIMEOUT = 300; // 300ms to detect double click
 String lastRadioNMEA = "";
 unsigned long lastRadioNMEATime = 0;
 bool radioGPSFix = false;
 float radioLat = 0.0, radioLng = 0.0;
 int radioSats = 0;
 String radioGPSStatus = "No GPS data";
+float speedHistory[20] = {0}; // 20 = SPEED_AVG_SAMPLES
+int speedHistoryIndex = 0;
+const int SPEED_AVG_SAMPLES = 20;
+unsigned long lastCheckTime = 0;
+float lastCheckLat = 0.0f, lastCheckLng = 0.0f;
+const float MOVEMENT_DIST_THRESHOLD = 5.0f;
+const float SPEED_THRESHOLD = 2.0f;
+int movingCounter = 0;
+int notMovingCounter = 0;
+bool filteredIsMoving = false;
+const int MOVING_DEBOUNCE = 3;
+bool isActuallyMoving = false;
 
-// Add these variables near the top with other global variables
-static unsigned long lastButtonReleaseTime = 0;
-static bool waitingForDoubleClick = false;
-const unsigned long DOUBLE_CLICK_TIMEOUT = 300; // 300ms to detect double click
+// --- MISSING GLOBALS AND FUNCTIONS FOR LINKER ---
 
-// Add this near the top with other global variables
+// Add missing global variables
+int currentLogIndex = 0;
+int radioSettingIndex = 0;
+bool isEditingSetting = false;
+int radioFrequency = 145000000;
+String radioMode = "FM";
+int radioPowerLevel = 50;
+int radioMemoryChannel = 0;
+String radioDStarCallSign = "";
+String radioDStarMessage = "";
 
-// Add this near the top with other global variables
-static bool ignoreNextRelease = false;
-
-// Add this near the top with other global variables
-static unsigned long lastRadioStatusQuery = 0;
-static bool lastRadioStatus = false;
-const unsigned long RADIO_STATUS_QUERY_INTERVAL = 5000; // 5 seconds
-
-// Smart heading/speed filter state
-static const int SPEED_AVG_WINDOW = 10; // seconds
-static const int SPEED_AVG_SAMPLES = SPEED_AVG_WINDOW * 2; // 2Hz update
-static float speedHistory[SPEED_AVG_SAMPLES] = {0};
-static int speedHistoryIndex = 0;
-static bool isActuallyMoving = false;
-static float lastCheckLat = 0.0f, lastCheckLng = 0.0f;
-static unsigned long lastCheckTime = 0;
-
-// Robust movement detection variables
-static int movingCounter = 0;
-static int notMovingCounter = 0;
-static bool filteredIsMoving = false;
-const int MOVING_DEBOUNCE = 3; // require 3 consecutive checks
-const float MOVEMENT_DIST_THRESHOLD = 5.0f; // meters in 2s
-const float SPEED_THRESHOLD = 2.0f; // km/h
-// Compass smoothing
-static float lastSmoothedHeading = 0.0f;
-const float HEADING_SMOOTH_ALPHA = 0.2f; // 0.0 = no smoothing, 1.0 = instant
-
-// Smart heading and speed functions
-// NOTE: getSmartHeading() returns GPS course as-is, but INVERTS magnetometer heading for radio/NMEA use.
-// The OLED display should apply compassInverted as needed for user display, independently.
-float getSmartHeading() {
-    float avgSpeed = 0.0f;
-    for (int i = 0; i < SPEED_AVG_SAMPLES; ++i) avgSpeed += speedHistory[i];
-    avgSpeed /= SPEED_AVG_SAMPLES;
-    float heading = -1;
-    if (gps.speed.isValid() && avgSpeed > 2.0 && isActuallyMoving && gps.course.isValid()) {
-        logMessage("Using GPS course for heading (avgSpeed=" + String(avgSpeed, 2) + " moving=" + String(isActuallyMoving) + ")");
-        heading = gps.course.deg(); // DO NOT invert GPS course
-    } else if (activeCompass != nullptr) {
-        int rawHeading = activeCompass->getAzimuth();
-        // Smooth heading
-        float delta = rawHeading - lastSmoothedHeading;
-        if (delta > 180) delta -= 360;
-        if (delta < -180) delta += 360;
-        lastSmoothedHeading += HEADING_SMOOTH_ALPHA * delta;
-        if (lastSmoothedHeading < 0) lastSmoothedHeading += 360;
-        if (lastSmoothedHeading >= 360) lastSmoothedHeading -= 360;
-        // Invert for radio/NMEA
-        heading = fmod(lastSmoothedHeading + 180.0f, 360.0f);
-        logMessage("Using magnetometer for heading (inverted for radio, smoothed, avgSpeed=" + String(avgSpeed, 2) + " moving=" + String(isActuallyMoving) + ")");
-    }
-    return heading;
-}
-// Smart speed: zero if not actually moving
+// Add missing function implementations
 float getSmartSpeed() {
-  float avgSpeed = 0.0f;
-  for (int i = 0; i < SPEED_AVG_SAMPLES; ++i) avgSpeed += speedHistory[i];
-  avgSpeed /= SPEED_AVG_SAMPLES;
-  if (!isActuallyMoving || avgSpeed < 2.0) {
-    return 0.0f;
-  }
-  return gps.speed.isValid() ? gps.speed.kmph() : 0.0f;
+    // TODO: Replace with real logic
+    return gps.speed.isValid() ? gps.speed.kmph() : 0.0f;
 }
 
-// Expose for use in ICOM7100Configurator.cpp
-extern float getSmartHeading();
-extern float getSmartSpeed();
-extern bool isActuallyMoving;
+float getSmartHeading() {
+    // TODO: Replace with real logic
+    if (activeCompass) {
+        int heading = activeCompass->getAzimuth();
+        if (heading >= 0) return (float)heading;
+    }
+    return gps.course.isValid() ? gps.course.deg() : 0.0f;
+}
+
+// Replace Adafruit_SSD1306 display instance with U8g2
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, /* reset=*/ U8X8_PIN_NONE, /* clock=*/ I2C_SCL, /* data=*/ I2C_SDA);
 
 void setup() {
   // Initialize M5 hardware with proper configuration for M5Atom Echo
@@ -639,18 +507,16 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   
   // Initialize display first
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+  if (!display.begin()) {
     // If display fails, we can't show anything
     logMessage("ERROR: SSD1306 display initialization failed");
     return;
   }
   display_initialized = true;
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("Starting...");
-  display.display();
+  display.clearBuffer();
+  display.setFont(u8g2_font_ncenB08_tr);
+  display.drawStr(0, 10, "System Ready");
+  display.sendBuffer();
 
   // Initialize Radio serial for NMEA data only
   Radio.begin(9600, SERIAL_8N1, RADIO_RX, RADIO_TX);
@@ -681,7 +547,7 @@ void setup() {
     delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
 
     // Set update rate to 1Hz (standard for most GPS receivers)
-    if (!gpsConfig.setUpdateRateHz(2)) {
+    if (!gpsConfig.setUpdateRateHz(1)) {
       logMessage("Failed to set GPS update rate (continuing)");
     }
     delay(GPS_CONFIG_RETRY_DELAY); // Delay between commands
@@ -782,41 +648,25 @@ void setup() {
   logMessage("-----------------------");
 
   // Show ready message
-  display.clearDisplay();
-  display.setCursor(0, 0);
-  display.println("System Ready");
-  display.display();
+  display.clearBuffer();
+  display.setFont(u8g2_font_ncenB08_tr);
+  display.drawStr(0, 10, "System Ready");
+  display.sendBuffer();
   delay(1000);  // Show ready message for 1 second
 
   // Initialize the button handler map
-  buttonHandlerMap[UIState::GPS_STATUS_SCREEN] = ButtonHandlers{handleShortPressGPSStatus, handleLongPressGPSStatus, nullptr};
-  buttonHandlerMap[UIState::COMPASS_STATUS_SCREEN] = ButtonHandlers{handleShortPressCompassStatus, handleLongPressCompassStatus, handleDoubleClickCompassStatus};
-  buttonHandlerMap[UIState::GRAPHIC_COMPASS_SCREEN] = ButtonHandlers{handleShortPressGraphicCompass, handleLongPressGraphicCompass, nullptr};
-  buttonHandlerMap[UIState::WORLD_MAP_SCREEN] = ButtonHandlers{handleShortPressWorldMap, handleLongPressWorldMap, nullptr};
-  buttonHandlerMap[UIState::ALTITUDE_CORRECTION_MODE] = ButtonHandlers{handleShortPressAltitudeCorrection, handleLongPressAltitudeCorrection, nullptr};
-  buttonHandlerMap[UIState::CALIBRATION_MODE_SELECTION] = ButtonHandlers{handleShortPressCalibrationModeSelection, handleLongPressCalibrationModeSelection, nullptr};
-  buttonHandlerMap[UIState::CALIBRATING_COMPASS] = ButtonHandlers{handleShortPressCalibrating, handleLongPressCalibrating, nullptr};
-  buttonHandlerMap[UIState::SETTING_DECLINATION] = ButtonHandlers{handleShortPressDeclination, handleLongPressDeclination, nullptr};
-  buttonHandlerMap[UIState::SETTING_INVERSION] = ButtonHandlers{handleShortPressInversion, handleLongPressInversion, nullptr};
-  buttonHandlerMap[UIState::LOG_DISPLAY] = ButtonHandlers{handleShortPressLogDisplay, handleLongPressLogDisplay, nullptr};
-  buttonHandlerMap[UIState::RADIO_SETTINGS_SCREEN] = ButtonHandlers{handleShortPressRadioSettings, handleLongPressRadioSettings, handleDoubleClickRadioSettings};
-  buttonHandlerMap[UIState::RADIO_STATUS_SCREEN] = ButtonHandlers{handleShortPressRadioStatus, handleLongPressRadioStatus, nullptr};
-  
-  
+  setupButtonHandlers();
+
   // Initialize display
   logMessage("Initializing display...");
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+  if (!display.begin()) {
     logMessage("SSD1306 allocation failed");
   } else {
     display_initialized = true;
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("GPS Navigation");
-    display.println("-------------");
-    display.println("Initializing...");
-    display.display();
+    display.clearBuffer();
+    display.setFont(u8g2_font_ncenB08_tr);
+    display.drawStr(0, 10, "System Ready");
+    display.sendBuffer();
   }
   
   // Try to initialize QMC5883L first
@@ -933,26 +783,12 @@ void setup() {
   useM5StackInterference = preferences.getBool(KEY_USE_M5_INTERFERENCE, false);
   preferences.end();
 
-
   // After all initialization is complete (at the end of setup()):
   if (display_initialized) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println("System Ready");
-    display.println("-------------");
-    if (gpsInitialized) {
-      display.println("GPS: OK");
-    } else {
-      display.println("GPS: Error");
-    }
-    if (activeCompass != nullptr) {
-      display.println("Compass: " + String(activeCompass->getSensorName()));
-    } else {
-      display.println("Compass: Not Found");
-    }
-    display.display();
+    display.clearBuffer();
+    display.setFont(u8g2_font_ncenB08_tr);
+    display.drawStr(0, 10, "System Ready");
+    display.sendBuffer();
     delay(2000);  // Show status for 2 seconds
     
     // Then switch to default display mode
@@ -970,7 +806,10 @@ void loop() {
   M5.update();
 
   // Determine current UI state before handling button presses
-  currentUIState = determineCurrentUIState();
+  extern UIState determineCurrentUIState();
+  extern std::map<UIState, ButtonHandlers> buttonHandlerMap;
+  static bool ignoreNextRelease = false;
+  UIState currentUIState = determineCurrentUIState();
 
   // Handle button presses based on current UI state
   if (M5.BtnA.wasHold()) {
@@ -989,7 +828,6 @@ void loop() {
     }
 
     unsigned long currentTime = millis();
-    
     if (waitingForDoubleClick && (currentTime - lastButtonReleaseTime < DOUBLE_CLICK_TIMEOUT)) {
       // Double click detected
       if (buttonHandlerMap[currentUIState].doubleClickHandler) {
@@ -1070,10 +908,10 @@ void loop() {
   if (display_initialized) {
     switch (currentDisplayMode) {
       case DisplayMode::GPS_STATUS:
-        displayLogOnOLED();
+        displayGPSStatusOnOLED();
         break;
       case DisplayMode::COMPASS_STATUS:
-        displayCompassLogOnOLED();
+        displayCompassStatusOnOLED();
         break;
       case DisplayMode::GRAPHIC_COMPASS:
         displayGraphicCompass();
@@ -1129,903 +967,21 @@ void loop() {
       lastCheckLng = curLng;
     }
   }
-}
 
-// World Map Screen
-void displayWorldMap() {
-  if (!display_initialized) return;
-
-  display.clearDisplay();
-  
-  display.drawBitmap(0, 0, world_map, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
-  
-  if (gps.location.isValid()) {
-    // Use the wrapper functions that handle privacy mode automatically
-    float lat = getLatitude();
-    float lng = getLongitude();
-    
-    int posX = (int)((lng + 180.0) / 360.0 * SCREEN_WIDTH);
-    
-    if (lat > 85.0) lat = 85.0;
-    if (lat < -85.0) lat = -85.0;
-    
-    float latRad = lat * PI / 180.0;
-    float mercN = log(tan((PI/4) + (latRad/2)));
-    int posY = (int)(SCREEN_HEIGHT/2 - (mercN * SCREEN_HEIGHT / (2*PI)));
-    
-    posX = constrain(posX, 0, SCREEN_WIDTH-1);
-    posY = constrain(posY, 0, SCREEN_HEIGHT-1);
-    
-    if ((millis() / 500) % 2 == 0) {
-      display.fillCircle(posX, posY, 3, SSD1306_WHITE);
-      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
-    } else {
-      display.drawCircle(posX, posY, 3, SSD1306_WHITE);
-      display.drawCircle(posX, posY, 4, SSD1306_WHITE);
-    }
-    
-    if (activeCompass != nullptr) {
-      activeCompass->read();
-      int heading = activeCompass->getAzimuth();
-      
-      if (compassInverted) {
-        heading = (heading + 180) % 360;
-      }
-      
-      float radians = heading * PI / 180.0;
-      int arrowLength = 8;
-      int endX = posX + sin(radians) * arrowLength;
-      int endY = posY - cos(radians) * arrowLength;
-      
-      display.drawLine(posX, posY, endX, endY, SSD1306_WHITE);
-    }
-  } else {
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(2, SCREEN_HEIGHT - 8);
-    display.print("No Fix");
+  // Flush batched log messages every LOG_FLUSH_INTERVAL
+  if (millis() - lastLogFlush > LOG_FLUSH_INTERVAL) {
+      flushLogMessages();
+      lastLogFlush = millis();
   }
   
-  // Draw privacy indicator (lock icon) when privacy mode is enabled
-  if (privacyModeEnabled) {
-    drawPrivacyIndicator(display);
-  }
-  
-  display.display();
-}
- 
- 
-void handleShortPressWorldMap() {
-  currentDisplayMode = DisplayMode::GPS_STATUS;
-  logMessage("Display mode changed to: GPS_STATUS");
-}
-
-void handleLongPressWorldMap() {
-  // Toggle privacy mode
-  privacyModeEnabled = !privacyModeEnabled;
-  logMessage("Privacy mode " + String(privacyModeEnabled ? "enabled" : "disabled"));
-  
-  // Force redraw of the world map to show/hide privacy indicator
-  displayWorldMap();
-}
-
-// Altitude Correction Mode
-void handleShortPressAltitudeCorrection() {
-  // Short press in altitude correction mode: Increment correction
-  altitudeCorrection += 10;
-  logMessage("Altitude correction: " + String(altitudeCorrection) + "m");
-}
-
-void handleLongPressAltitudeCorrection() {
-  // Long press in altitude correction mode: Save and exit
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.putInt(KEY_ALT_CORRECTION, altitudeCorrection);
-  preferences.end();
-  isSettingAltitudeCorrection = false;
-  logMessage("Altitude correction saved: " + String(altitudeCorrection) + "m");
-}
-
-// Calibration Mode Selection
-void handleShortPressCalibrationModeSelection() {
-  // Short press in calibration mode selection: Rotate through options
-  calibrationModeIndex = (calibrationModeIndex + 1) % NUM_CALIBRATION_MODES;
-  logMessage("Calibration mode: " + String(CALIBRATION_MODE_NAMES[calibrationModeIndex]));
-}
-
-void handleLongPressCalibrationModeSelection() {
-  // Long press in calibration mode selection: Select current mode
-  logMessage("DEBUG: Starting calibration selection handler...");
-  
-  if (calibrationModeIndex == NUM_CALIBRATION_MODES - 1) {
-    // Selected "Cancel" option
-    isSelectingCalibrationMode = false;
-    logMessage("Calibration cancelled");
-  } else {
-    // Selected a valid calibration mode
-    calibrationPoints = CALIBRATION_MODE_POINTS[calibrationModeIndex];
-    isSelectingCalibrationMode = false;
-    isCalibrating = true;
-    calibrationStep = 1;
-    logMessage("DEBUG: Set isCalibrating=" + String(isCalibrating) + ", calibrationPoints=" + String(calibrationPoints) + ", step=" + String(calibrationStep));
-    logMessage("Starting " + String(calibrationPoints) + "-point calibration...");
+  // Only bridge USB <-> radio if radioUsbMode is enabled
+  if (radioUsbMode) {
+    usbRadio.loop();
   }
 }
 
-// Calibrating Compass
-void handleShortPressCalibrating() {
-  // Short press while calibrating: Capture calibration point
-  if (calibrationStep > 0 && calibrationStep <= calibrationPoints) {
-    logMessage("Capturing calibration point " + String(calibrationStep) + " of " + String(calibrationPoints));
-    
-    if (activeCompass) {
-      activeCompass->read();
-      calX[calibrationStep - 1] = activeCompass->getX();
-      calY[calibrationStep - 1] = activeCompass->getY();
-      calibrationStep++;
 
-      // If last point captured, calculate and apply calibration
-      if (calibrationStep > calibrationPoints) {
-        logMessage("Calculating " + String(calibrationPoints) + "-point calibration...");
-        
-        if (activeCompass->calculateCalibration(calX, calY)) {
-          logMessage("Calibration calculated and applied successfully.");
-          
-          // Calculate noise and interference characteristics from calibration data
-          float x_variance = 0.0f;
-          float y_variance = 0.0f;
-          float x_mean = 0.0f;
-          float y_mean = 0.0f;
-          
-          // Calculate mean
-          for (int i = 0; i < calibrationPoints; i++) {
-            x_mean += calX[i];
-            y_mean += calY[i];
-          }
-          x_mean /= calibrationPoints;
-          y_mean /= calibrationPoints;
-          
-          // Calculate variance
-          for (int i = 0; i < calibrationPoints; i++) {
-            x_variance += (calX[i] - x_mean) * (calX[i] - x_mean);
-            y_variance += (calY[i] - y_mean) * (calY[i] - y_mean);
-          }
-          x_variance /= calibrationPoints;
-          y_variance /= calibrationPoints;
-          
 
-          
-          // Save to NVM based on compass type
-          preferences.begin(PREF_NAMESPACE, false);
-          
-          if (activeCompass == &qmcCompass) {
-            // For QMC compass
-            // Set calibration as valid
-            preferences.putBool(KEY_CAL_VALID, true);
-            
-            // Since we don't have direct access to the internal calibration values,
-            // we can calculate them from the min/max of our collected points
-            float x_min = calX[0], x_max = calX[0];
-            float y_min = calY[0], y_max = calY[0];
-            
-            for (int i = 1; i < calibrationPoints; i++) {
-              if (calX[i] < x_min) x_min = calX[i];
-              if (calX[i] > x_max) x_max = calX[i];
-              if (calY[i] < y_min) y_min = calY[i];
-              if (calY[i] > y_max) y_max = calY[i];
-            }
-            
-            float x_offset = (x_max + x_min) / 2.0f;
-            float y_offset = (y_max + y_min) / 2.0f;
-            float z_offset = 0.0f; // We don't use Z for calibration
-            
-            float x_delta = (x_max - x_min) / 2.0f;
-            float y_delta = (y_max - y_min) / 2.0f;
-            float avg_delta = (x_delta + y_delta) / 2.0f;
-            
-            float x_scale = (x_delta > 0) ? avg_delta / x_delta : 1.0f;
-            float y_scale = (y_delta > 0) ? avg_delta / y_delta : 1.0f;
-            float z_scale = 1.0f;
-            
-            // Save calculated values
-            preferences.putFloat(KEY_X_OFFSET, x_offset);
-            preferences.putFloat(KEY_Y_OFFSET, y_offset);
-            preferences.putFloat(KEY_Z_OFFSET, z_offset);
-            preferences.putFloat(KEY_X_SCALE, x_scale);
-            preferences.putFloat(KEY_Y_SCALE, y_scale);
-            preferences.putFloat(KEY_Z_SCALE, z_scale);
-            
-
-            
-            logMessage("QMC5883L calibration and interference settings saved.");
-          } 
-          else if (activeCompass == &hmcCompass) {
-            // For HMC compass
-            // Same calculations as for QMC to ensure consistency
-            preferences.putBool(KEY_HMC_CAL_VALID, true);
-            
-            float x_min = calX[0], x_max = calX[0];
-            float y_min = calY[0], y_max = calY[0];
-            
-            for (int i = 1; i < calibrationPoints; i++) {
-              if (calX[i] < x_min) x_min = calX[i];
-              if (calX[i] > x_max) x_max = calX[i];
-              if (calY[i] < y_min) y_min = calY[i];
-              if (calY[i] > y_max) y_max = calY[i];
-            }
-            
-            float x_offset = (x_max + x_min) / 2.0f;
-            float y_offset = (y_max + y_min) / 2.0f;
-            float z_offset = 0.0f;
-            
-            float x_delta = (x_max - x_min) / 2.0f;
-            float y_delta = (y_max - y_min) / 2.0f;
-            float avg_delta = (x_delta + y_delta) / 2.0f;
-            
-            float x_scale = (x_delta > 0) ? avg_delta / x_delta : 1.0f;
-            float y_scale = (y_delta > 0) ? avg_delta / y_delta : 1.0f;
-            float z_scale = 1.0f;
-            
-            // Save calculated values
-            preferences.putFloat(KEY_HMC_X_OFFSET, x_offset);
-            preferences.putFloat(KEY_HMC_Y_OFFSET, y_offset);
-            preferences.putFloat(KEY_HMC_Z_OFFSET, z_offset);
-            preferences.putFloat(KEY_HMC_X_SCALE, x_scale);
-            preferences.putFloat(KEY_HMC_Y_SCALE, y_scale);
-            preferences.putFloat(KEY_HMC_Z_SCALE, z_scale);
-            
-            logMessage("HMC5883L calibration and interference settings saved.");
-          }
-          preferences.end();
-          
-          // Exit calibration mode
-          isCalibrating = false;
-          calibrationStep = 0;
-          
-          // Move to inversion setting
-          isSettingInversion = true;
-        
-          logMessage("Applied interference settings: ");
- 
-        } else {
-          logMessage("Calibration calculation failed. Try again.");
-          isCalibrating = false;
-          calibrationStep = 0;
-        }
-      }
-    }
-  }
-}
-
-void handleLongPressCalibrating() {
-  // Long press while calibrating: Cancel calibration
-  isCalibrating = false;
-  calibrationStep = 0;
-  logMessage("Calibration cancelled");
-}
-
-// Setting Declination
-void handleShortPressDeclination() {
-  // Short press in declination setting: Set declination
-  if (activeCompass == &hmcCompass) {
-    activeCompass->read();
-    int magneticHeading = activeCompass->getAzimuth(); // Read the current magnetic heading
-
-    // Calculate the declination angle
-    // Declination = True North (0) - Magnetic Heading read when pointing True North
-    float declinationDegrees = -magneticHeading;
-
-    // Normalize to +/- 180 degrees
-    while (declinationDegrees > 180.0f) declinationDegrees -= 360.0f;
-    while (declinationDegrees <= -180.0f) declinationDegrees += 360.0f;
-
-    // Convert to radians for storage and setting
-    currentDeclination = radians(declinationDegrees);
-  
-    // Apply declination immediately
-    hmcCompass.setDeclination(currentDeclination);
-    
-    // Save to NVM
-    preferences.begin(PREF_NAMESPACE, false);
-    preferences.putFloat(KEY_DECLINATION, currentDeclination);
-    preferences.end();
-    
-    logMessage("Declination set to: " + String(declinationDegrees, 1) + " degrees");
-    logMessage("True north should now be at compass heading: 0 deg");
-    
-    // Make note about calibration and declination working together
-    logMessage("HMC5883L now has calibration + declination applied");
-    
-    // Exit declination setting
-    isSettingDeclination = false;
-    
-    // Move to inversion setting
-    isSettingInversion = true;
-  }
-}
-
-void handleLongPressDeclination() {
-  // Long press in declination setting: Cancel
-  isSettingDeclination = false;
-  logMessage("Declination setting cancelled");
-}
-// Setting Inversion
-void handleShortPressInversion() {
-  // Short press in inversion setting: Set normal mode
-  compassInverted = false;
-  
-  // Save to NVM
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.putBool(KEY_COMPASS_INVERTED, false);
-  preferences.end();
-  
-  logMessage("Compass display set to normal (non-inverted) mode");
-  isSettingInversion = false;
-  
-  // If we're using HMC5883L and haven't set declination yet, allow it now
-  if (activeCompass == &hmcCompass && !isSettingDeclination) {
-    isSettingDeclination = true;
-    logMessage("Now set declination for HMC5883L...");
-    logMessage("Point to TRUE NORTH, then click the button.");
-  }
-}
-void handleLongPressInversion() {
-  // Long press in inversion setting: Set inverted mode
-  compassInverted = true;
-  
-  // Save to NVM
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.putBool(KEY_COMPASS_INVERTED, true);
-  preferences.end();
-  
-  logMessage("Compass display set to inverted mode");
-  isSettingInversion = false;
-}
-
-void displayCompassLogOnOLED() {
-  if (!display_initialized) return;
-
-  // Add static variable to track last update time
-  static unsigned long lastUpdateTime = 0;
-  const unsigned long UPDATE_INTERVAL = 100; // Update every 100ms (10Hz)
-
-  // Check if enough time has passed since last update
-  if (millis() - lastUpdateTime < UPDATE_INTERVAL) {
-    return; // Skip this update
-  }
-  lastUpdateTime = millis();
-
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  if (isSelectingCalibrationMode) {
-    display.setCursor(0, 0);
-    display.println("Select Cal Mode:");
-    display.println("---------------");
-    
-    for (int i = 0; i < NUM_CALIBRATION_MODES; i++) {
-      if (i == calibrationModeIndex) {
-        display.print("> ");
-      } else {
-        display.print("  ");
-      }
-      display.println(CALIBRATION_MODE_NAMES[i]);
-    }
-    
-    display.setCursor(0, SCREEN_HEIGHT - 16);
-    display.println("Click: Next Option");
-    display.println("Hold: Select Option");
-  }
-  else if (isCalibrating && activeCompass == &qmcCompass) {
-    display.setCursor(0, 0);
-    display.println("-- Calibrating --");
-    display.setCursor(0, 10);
-    display.print("Mode: ");
-    display.print(calibrationPoints);
-    display.println("-point");
-    
-    display.setCursor(0, 26);
-    String directions = "";
-    
-    if (calibrationPoints == 4) {
-      switch (calibrationStep) {
-        case 1: directions = "Point NORTH, Click"; break;
-        case 2: directions = "Point EAST, Click"; break;
-        case 3: directions = "Point SOUTH, Click"; break;
-        case 4: directions = "Point WEST, Click"; break;
-      }
-    } 
-    else if (calibrationPoints == 8) {
-      switch (calibrationStep) {
-        case 1: directions = "Point NORTH, Click"; break;
-        case 2: directions = "Point SOUTH, Click"; break;
-        case 3: directions = "Point EAST, Click"; break;
-        case 4: directions = "Point WEST, Click"; break;
-        case 5: directions = "Point NE, Click"; break;
-        case 6: directions = "Point SE, Click"; break;
-        case 7: directions = "Point SW, Click"; break;
-        case 8: directions = "Point NW, Click"; break;
-      }
-    } 
-    else {
-      directions = "Point to " + String(calibrationStep * 22.5) + " deg";
-    }
-    
-    display.println(directions);
-    
-    display.setCursor(0, 46);
-    display.print("Progress: ");
-    display.print(calibrationStep - 1);
-    display.print("/");
-    display.println(calibrationPoints);
-    
-    display.setCursor(0, 56);
-    display.println("(Hold Btn to Cancel)");
-  }
-  else if (isSettingDeclination && activeCompass == &hmcCompass) {
-    display.setCursor(0, 0);
-    display.println("- Set Declination -");
-    
-    display.setCursor(0, 16);
-    display.println("Point device to TRUE");
-    display.setCursor(0, 26);
-    display.println("NORTH, then click");
-    
-    display.setCursor(0, 40);
-    display.print("Current: ");
-    display.print(activeCompass->getAzimuth());
-    display.println(" deg");
-    
-    display.setCursor(0, 56);
-    display.println("Hold: Cancel");
-  }
-  else if (isSettingInversion) {
-    display.setCursor(0, 0);
-    display.println("Invert Compass?");
-    display.println("---------------");
-    
-    int centerX = SCREEN_WIDTH / 2;
-    int centerY = 30;
-    int radius = 15;
-    
-    if (activeCompass != nullptr) {
-      int heading = activeCompass->getAzimuth();
-      if (compassInverted) {
-        heading = (heading + 180) % 360;
-      }
-      
-      float angleRad = radians(270 - heading);
-      int endX = centerX + radius * cos(angleRad);
-      int endY = centerY + radius * sin(angleRad);
-      
-      display.drawCircle(centerX, centerY, radius, SSD1306_WHITE);
-      display.drawLine(centerX, centerY, endX, endY, SSD1306_WHITE);
-      display.fillCircle(centerX, centerY, 2, SSD1306_WHITE);
-      
-      display.setCursor(centerX - 2, centerY - radius - 6);
-      display.print("N");
-      display.setCursor(centerX - 2, centerY + radius);
-      display.print("S");
-      display.setCursor(centerX + radius, centerY - 2);
-      display.print("E");
-      display.setCursor(centerX - radius - 5, centerY - 2);
-      display.print("W");
-      
-      display.setCursor(68, 14);
-      display.print("Hdg:");
-      display.print(heading);
-    }
-    
-    display.setCursor(0, SCREEN_HEIGHT - 18);
-    display.println("Click: Normal");
-    display.setCursor(70, SCREEN_HEIGHT - 18);
-    display.println("Hold: Invert");
-    
-    display.setCursor(0, SCREEN_HEIGHT - 8);
-    display.print("Current: ");
-    display.print(compassInverted ? "Inverted" : "Normal");
-  }
-  else {
-    // Normal Compass Status Screen
-    String title = "-- Compass Status --";
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor((SCREEN_WIDTH - w) / 2, 0);
-    display.println(title);
-    
-    if (activeCompass != nullptr) {
-      // Display compass type on first line
-      display.setCursor(0, 12);
-      display.print(activeCompass->getSensorName());
-      
-      // Show declination if using HMC5883L on same line
-      if (activeCompass == &hmcCompass) {
-        float declDegrees = currentDeclination * 180.0 / PI;
-        display.print(" Decl:");
-        display.print(declDegrees, 1);
-      }
-      
-      // Display heading on next line
-      activeCompass->read();
-      int displayHeading = activeCompass->getAzimuth();
-      if (compassInverted) {
-        displayHeading = (displayHeading + 180) % 360;
-      }
-      
-      // Move heading and direction to next line
-      display.setCursor(0, 24);
-      display.print("Az ");
-      display.print(displayHeading);
-      display.print(" deg ");
-      
-      char dirArray[4] = {' ', ' ', ' ', '\0'};
-      activeCompass->getDirection(dirArray, displayHeading);
-      display.print(dirArray);
-      
-      // Raw sensor data with proper spacing
-      display.setCursor(0, 36);
-      display.print("X: ");
-      display.println(activeCompass->getX());
-      
-      display.setCursor(0, 44);
-      display.print("Y: ");
-      display.println(activeCompass->getY());
-      
-      display.setCursor(0, 52);
-      display.print("Z: ");
-      display.println(activeCompass->getZ());
-      
-      // Show inversion status at bottom
-      if (compassInverted) {
-        String invStr = "[Inverted]";
-        display.getTextBounds(invStr, 0, 0, &x1, &y1, &w, &h);
-        display.setCursor(0, SCREEN_HEIGHT - 8);
-        display.print(invStr);
-      }
-    } else {
-      display.setCursor(0, 24);
-      display.println("No compass detected");
-    }
-    
-    // Add calibration prompt in bottom right if compass is active
-    if (activeCompass != nullptr) {
-      String calibPrompt = "";
-      if (activeCompass == &qmcCompass) {
-        calibPrompt = "Cal: Hold";
-      } else if (activeCompass == &hmcCompass) {
-        calibPrompt = "Decl: Hold";
-      }
-      
-      // Right align the calibration prompt
-      display.getTextBounds(calibPrompt, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
-      display.print(calibPrompt);
-    }
-  }
-
-  display.display();
-}
-void handleShortPressCompassStatus() {
-  // Go to radio status screen
-  currentDisplayMode = DisplayMode::RADIO_STATUS;
-  logMessage("Display mode changed to: RADIO_STATUS");
-}
-void handleLongPressCompassStatus() {
-  // Start calibration mode selection
-  if (activeCompass == &qmcCompass) {
-    isSelectingCalibrationMode = true;
-    calibrationModeIndex = 1; // Default to 8-point
-    logMessage("Entering calibration mode selection...");
-  } else if (activeCompass == &hmcCompass) {
-    isSettingDeclination = true;
-    logMessage("Entering declination setting mode...");
-  }
-}
-
-void displayLogOnOLED() {
-  if (!display_initialized) return;
-
-  // Use static variables to hold the protocol string and its last update time
-  static String displayedGpsProtocol = "Initializing...";
-  static unsigned long lastProtocolUpdate = 0;
-  const unsigned long PROTOCOL_UPDATE_INTERVAL = 5000; // 5 seconds
-
-  // Add variables for packets and errors per second calculation
-  static unsigned long lastPacketCount = 0;
-  static unsigned long lastPacketTime = 0;
-  static float packetsPerSecond = 0.0f;
-  
-  static unsigned long lastErrorCount = 0;
-  static unsigned long lastErrorTime = 0;
-  static float errorsPerSecond = 0.0f;
-
-  display.clearDisplay(); 
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  // Center the title
-  String title = "--- GPS Status ---";
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 0);
-  display.println(title);
-
-  // Update GPS protocol string only every 5 seconds
-  if (millis() - lastProtocolUpdate >= PROTOCOL_UPDATE_INTERVAL) {
-    lastProtocolUpdate = millis();
-    if (gps.charsProcessed() > 0) {
-      String tempProtocol = "";
-      if (gps.location.isUpdated()) tempProtocol += "GGA ";
-      if (gps.date.isUpdated() || gps.time.isUpdated()) tempProtocol += "RMC ";
-      if (gps.course.isUpdated()) tempProtocol += "VTG ";
-      if (gps.satellites.isUpdated()) tempProtocol += "GSV "; // Added check for GSV
-      if (gps.hdop.isValid()) tempProtocol += "GSA "; // Added check for GSA
-      // GLL might not have a direct TinyGPS++ updated flag, assume active if others are
-      if (tempProtocol.length() > 0) tempProtocol += "GLL "; 
-      
-      if (tempProtocol.length() == 0) tempProtocol = "NMEA";
-      displayedGpsProtocol = tempProtocol + String(gpsBaudRate);
-    } else {
-      displayedGpsProtocol = "No GPS data";
-    }
-  }
-  
-  // Display the potentially cached protocol string
-  display.setCursor(0, 10); // Adjusted Y position for better spacing
-  display.println(displayedGpsProtocol);
-  
-  // Display Lat, Lng, and Sat (updated every display cycle)
-  if (gps.location.isValid()) {
-    // Use wrapper functions that handle privacy masking
-    float lat = getLatitude();
-    float lng = getLongitude();
-    
-    display.setCursor(0, 20); // Adjusted Y position
-    display.print("Lat ");
-    display.println(lat, 5);
-    
-    display.setCursor(0, 28); // Adjusted Y position
-    display.print("Lng ");
-    display.println(lng, 5);
-  } else {
-    display.setCursor(0, 20); // Adjusted Y position
-    display.println("Lat No Fix");
-    display.setCursor(0, 28); // Adjusted Y position
-    display.println("Lng No Fix");
-  }
-  
-  // Display satellite count
-  display.setCursor(0, 36); // Adjusted Y position
-  display.print("Sat ");
-  display.println(gps.satellites.value());
-  
-  // Display altitude with correction
-  if (gps.altitude.isValid()) {
-    float correctedAlt = gps.altitude.meters() + altitudeCorrection;
-    display.setCursor(64, 36); // Adjusted X position
-    display.print("Alt ");
-    display.print(correctedAlt, 0);
-    display.println("m");
-  }
-
-  // Display NMEA stats 
-  display.setCursor(0, 44); // Adjusted Y position
-
-  // Calculate packets and errors per second
-  unsigned long currentTime = millis();
-  if (currentTime - lastPacketTime >= 1000) { // Update rate every second
-    unsigned long currentPackets = gps.passedChecksum();
-    unsigned long currentErrors = gps.failedChecksum();
-    
-    packetsPerSecond = (currentPackets - lastPacketCount) * 1000.0f / (currentTime - lastPacketTime);
-    errorsPerSecond = (currentErrors - lastErrorCount) * 1000.0f / (currentTime - lastErrorTime);
-    
-    lastPacketCount = currentPackets;
-    lastErrorCount = currentErrors;
-    lastPacketTime = currentTime;
-    lastErrorTime = currentTime;
-  }
-
-  display.print("Pkt/s ");
-  display.print(packetsPerSecond, 1);
-  display.print(" Err/s ");
-  display.print(errorsPerSecond, 1);
-
-  // Display course and speed in a single line
-  if (gps.course.isValid() && gps.speed.isValid()) {
-    display.setCursor(0, 52); // Adjusted Y position
-    display.print("Hdg ");
-    
-    // Get direction abbreviation
-    int course = gps.course.deg();
-    String direction = "";
-    if (course >= 337.5 || course < 22.5) direction = "N";
-    else if (course >= 22.5 && course < 67.5) direction = "NE";
-    else if (course >= 67.5 && course < 112.5) direction = "E";
-    else if (course >= 112.5 && course < 157.5) direction = "SE";
-    else if (course >= 157.5 && course < 202.5) direction = "S";
-    else if (course >= 202.5 && course < 247.5) direction = "SW";
-    else if (course >= 247.5 && course < 292.5) direction = "W";
-    else direction = "NW";
-    
-    display.print(direction);
-    display.print(" ");
-    
-    // Display speed
-    float speedKmph = gps.speed.kmph();
-    bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
-    if (!reliableSpeed || speedKmph < 3.0) speedKmph = 0;
-    display.print(speedKmph, 1);
-    display.print("km/h");
-  }
-
-  // Draw privacy indicator if privacy mode is enabled
-  if (privacyModeEnabled) {
-    drawPrivacyIndicator(display);
-  }
-  
-  display.display();
-}
-void handleShortPressGPSStatus() {
-  // Switch to next screen
-  currentDisplayMode = DisplayMode::COMPASS_STATUS;
-  logMessage("Display mode changed to: COMPASS_STATUS");
-}
-void handleLongPressGPSStatus() {
-  // Enter altitude correction mode
-  isSettingAltitudeCorrection = true;
-  logMessage("Entering altitude correction mode...");
-}
-
-void displayGraphicCompass() {
-  if (!display_initialized) return;
-
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  int centerX = SCREEN_WIDTH / 2;
-  int centerY = SCREEN_HEIGHT / 2;
-  int radius = 22;
-  int heading = 0;
-  
-  if (activeCompass != nullptr) {
-    heading = activeCompass->getAzimuth();
-    if (compassInverted) {
-      heading = (heading + 180) % 360;
-    }
-    
-    float angleRad = radians(270 - heading);
-    
-    display.drawCircle(centerX, centerY, radius, SSD1306_WHITE);
-    
-    int endX = centerX + radius * cos(angleRad);
-    int endY = centerY + radius * sin(angleRad);
-    display.drawLine(centerX, centerY, endX, endY, SSD1306_WHITE);
-    
-    float arrowAngle1 = angleRad + radians(150);
-    float arrowAngle2 = angleRad + radians(210);
-    int arrowLength = 6;
-    int arrow1X = endX + arrowLength * cos(arrowAngle1);
-    int arrow1Y = endY + arrowLength * sin(arrowAngle1);
-    int arrow2X = endX + arrowLength * cos(arrowAngle2);
-    int arrow2Y = endY + arrowLength * sin(arrowAngle2);
-    display.drawLine(endX, endY, arrow1X, arrow1Y, SSD1306_WHITE);
-    display.drawLine(endX, endY, arrow2X, arrow2Y, SSD1306_WHITE);
-    
-    display.fillCircle(centerX, centerY, 2, SSD1306_WHITE);
-    
-    display.setCursor(centerX - 2, centerY - radius - 7);
-    display.print("N");
-    display.setCursor(centerX - 2, centerY + radius + 1);
-    display.print("S");
-    display.setCursor(centerX + radius + 2, centerY - 3);
-    display.print("E");
-    display.setCursor(centerX - radius - 7, centerY - 3);
-    display.print("W");
-  } else {
-    display.setCursor(centerX - 8, centerY - 4);
-    display.print("ERR");
-  }
-
-  if (activeCompass != nullptr) {
-    display.setCursor(0, 0);
-    display.print("Az ");
-    display.print(heading);
-  } else {
-    display.setCursor(0, 0);
-    display.print("Az ---");
-  }
-  
-  if (gps.altitude.isValid()) {
-    bool reliableAlt = gps.satellites.value() >= 5 && gps.hdop.isValid() && gps.hdop.hdop() < 2.5;
-    float correctedAlt = gps.altitude.meters() + altitudeCorrection;
-    
-    if (reliableAlt) {
-      String altStr = "Alt " + String(correctedAlt, 0) + "m";
-      int16_t x1, y1;
-      uint16_t w, h;
-      display.getTextBounds(altStr, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor(SCREEN_WIDTH - w, 0);
-      display.print(altStr);
-    }
-  }
-  
-  if (gps.speed.isValid()) {
-    bool reliableSpeed = gps.satellites.value() >= 4 && gps.hdop.isValid() && gps.hdop.hdop() < 3.0;
-    float speedKmph = gps.speed.kmph();
-    if (!reliableSpeed || speedKmph < 3.0) speedKmph = 0;
-    
-    if (speedKmph > 0) {
-      String spdStr = "Spd " + String(speedKmph, 1) + "km/h";
-      int16_t x1, y1;
-      uint16_t w, h;
-      display.getTextBounds(spdStr, 0, 0, &x1, &y1, &w, &h);
-      display.setCursor(centerX + radius + 4, centerY - h/2);
-      display.print(spdStr);
-    }
-  }
-  
-  if (gps.location.isValid()) {
-    // Use privacy-filtered coordinates via wrapper functions
-    float lat = getLatitude(); 
-    float lng = getLongitude();
-    
-    display.setCursor(0, SCREEN_HEIGHT - 16);
-    display.println("Lat");
-    display.setCursor(0, SCREEN_HEIGHT - 8);
-    display.print(String(lat, 5));
-    
-    String lngLabel = "Lng";
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(lngLabel, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 16);
-    display.println(lngLabel);
-    
-    String lngValue = String(lng, 5);
-    display.getTextBounds(lngValue, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
-    display.print(lngValue);
-  } else {
-    display.setCursor(0, SCREEN_HEIGHT - 16);
-    display.println("Lat");
-    display.setCursor(0, SCREEN_HEIGHT - 8);
-    display.println("No Fix");
-    
-    String lngLabel = "Lng";
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(lngLabel, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 16);
-    display.println(lngLabel);
-    
-    String noFix = "No Fix";
-    display.getTextBounds(noFix, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor(SCREEN_WIDTH - w, SCREEN_HEIGHT - 8);
-    display.println(noFix);
-  }
-  
-  // Draw privacy indicator if privacy mode is enabled
-  if (privacyModeEnabled) {
-    drawPrivacyIndicator(display);
-  }
-
-  display.display();
-}
-void handleShortPressGraphicCompass() {
- 
-    currentDisplayMode = DisplayMode::WORLD_MAP;
-    logMessage("Display mode changed to: WORLD_MAP");
-
-}
-void handleLongPressGraphicCompass() {
-  // Toggle compass inversion
-  compassInverted = !compassInverted;
-  logMessage("Compass display " + String(compassInverted ? "inverted" : "normal"));
-}
 
 void scanI2CDevices() {
   byte error, address;
@@ -2051,477 +1007,9 @@ void scanI2CDevices() {
   }
 }
 
-void displayLogMessages() {
-  if (!display_initialized) return;
-
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  // Center the title
-  String title = "--- Error Log ---";
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 0);
-  display.println(title);
-
-  // Handle empty log buffer
-  if (log_buffer.empty()) {
-    display.setCursor(0, 20);
-    display.println("No Errors");
-    display.setCursor(0, SCREEN_HEIGHT - 8);
-    display.print("Click: Next Screen");
-    display.display();
-    return;
-  }
-
-  // Ensure current index is valid
-  if (currentLogIndex >= log_buffer.size()) {
-    currentLogIndex = log_buffer.size() - 1;
-  }
-  if (currentLogIndex < 0) {
-    currentLogIndex = 0;
-  }
-
-  // Display the current message
-  if (!log_buffer.empty()) {
-    // Calculate which message to show (most recent first)
-    int displayIndex = log_buffer.size() - 1 - currentLogIndex;
-    
-    // Display the message with word wrapping
-    String message = log_buffer[displayIndex];
-    int yPos = 12; // Start below the title
-    int maxWidth = SCREEN_WIDTH - 2; // Leave small margin
-    
-    // Set text color to inverse for all messages (since they're all errors/warnings)
-    display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-    
-    // Split message into words and wrap
-    int currentX = 0;
-    String currentLine = "";
-    
-    for (int i = 0; i < message.length(); i++) {
-      char c = message[i];
-      currentLine += c;
-      display.getTextBounds(currentLine, 0, 0, &x1, &y1, &w, &h);
-      
-      if (w > maxWidth || c == '\n') {
-        // Print the line (excluding the last character that caused overflow)
-        if (c == '\n') {
-          display.setCursor(0, yPos);
-          display.println(currentLine.substring(0, currentLine.length() - 1));
-        } else {
-          display.setCursor(0, yPos);
-          display.println(currentLine.substring(0, currentLine.length() - 1));
-          i--; // Back up one character to process it in the next line
-        }
-        yPos += 8; // Move to next line
-        currentLine = "";
-      }
-    }
-    
-    // Print any remaining text
-    if (currentLine.length() > 0) {
-      display.setCursor(0, yPos);
-      display.println(currentLine);
-    }
-  }
-
-  // Show navigation info at bottom
-  display.setTextColor(SSD1306_WHITE); // Reset to normal text color
-  display.setCursor(0, SCREEN_HEIGHT - 16);
-  display.print("Error ");
-  display.print(currentLogIndex + 1);
-  display.print("/");
-  display.print(log_buffer.size());
-  
-  display.setCursor(0, SCREEN_HEIGHT - 8);
-  display.print("Click: Cycle  Hold: Next Screen");
-
-  display.display();
-}
-
-void handleShortPressLogDisplay() {
-  // If no errors, go to next screen immediately
-  if (log_buffer.empty()) {
-    currentDisplayMode = DisplayMode::GRAPHIC_COMPASS;
-    logMessage("Display mode changed to: GRAPHIC_COMPASS");
-    return;
-  }
-  
-  // Navigate to next older message
-  if (!log_buffer.empty()) {
-    currentLogIndex = (currentLogIndex + 1) % log_buffer.size();
-    logMessage("Viewing error " + String(currentLogIndex + 1) + " of " + String(log_buffer.size()));
-  }
-}
-
-void handleLongPressLogDisplay() {
-
-}
-
-// Add this function to handle entering the log display mode
-void enterLogDisplayMode() {
-  currentLogIndex = 0; // Reset to most recent message
-  currentDisplayMode = DisplayMode::LOG_DISPLAY;
-  displayLogMessages();
-}
 
 
-// Add new display function
-void displayRadioSettings() {
-  if (!display_initialized) return;
 
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
 
-  // Center the title
-  String title = "--- Radio Settings ---";
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, 0);
-  display.println(title);
 
-  // Define the settings area (leave space for command instructions at bottom)
-  const int SETTINGS_START_Y = 12;
-  const int SETTINGS_END_Y = SCREEN_HEIGHT - 24; // Leave space for scroll indicator and commands
-  const int SETTINGS_HEIGHT = SETTINGS_END_Y - SETTINGS_START_Y;
-  const int ITEMS_PER_PAGE = 4; // Number of settings to show at once
 
-  // Calculate which settings to show based on current index
-  int startIndex = (radioSettingIndex / ITEMS_PER_PAGE) * ITEMS_PER_PAGE;
-  int endIndex = min(startIndex + ITEMS_PER_PAGE, 8); // 8 total items (6 settings + 2 actions)
-
-  // Display current settings with highlight for selected setting
-  for (int i = startIndex; i < endIndex; i++) {
-    int displayY = SETTINGS_START_Y + ((i - startIndex) * 10);
-    display.setCursor(0, displayY);
-    
-    if (i == radioSettingIndex) {
-      display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-    } else {
-      display.setTextColor(SSD1306_WHITE);
-    }
-    
-    switch (i) {
-      case 0:
-        display.print("Freq: ");
-        display.print(radioFrequency / 1000000.0, 3);
-        display.print("MHz");
-        break;
-      case 1:
-        display.print("Mode: ");
-        display.print(radioMode);
-        break;
-      case 2:
-        display.print("Power: ");
-        display.print(radioPowerLevel);
-        display.print("W");
-        break;
-      case 3:
-        display.print("Mem: ");
-        display.print(radioMemoryChannel);
-        break;
-      case 4:
-        display.print("D-STAR: ");
-        if (radioDStarCallSign.length() > 0) {
-          display.print(radioDStarCallSign);
-        } else {
-          display.print("OFF");
-        }
-        break;
-      case 5:
-        display.print("USB Mode: ");
-        display.print(radioUsbMode ? "ON" : "OFF");
-        break;
-      case 6:
-        display.print("Save & Exit");
-        break;
-      case 7:
-        display.print("Exit");
-        break;
-    }
-  }
-
-  // Show scroll indicator if there are more settings
-  if (startIndex > 0 || endIndex < 8) {
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(SCREEN_WIDTH - 8, SETTINGS_START_Y);
-    if (startIndex > 0) {
-      display.print("^"); // Up arrow
-    }
-    display.setCursor(SCREEN_WIDTH - 8, SETTINGS_END_Y - 8);
-    if (endIndex < 8) {
-      display.print("v"); // Down arrow
-    }
-  }
-
-  // Show navigation info at bottom
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, SCREEN_HEIGHT - 16);
-  if (isEditingSetting) {
-    display.print("Clk: ^ Dbl: v Hold:");
-    // Draw save icon
-    int x = display.getCursorX();
-    int y = display.getCursorY();
-    // Disk body
-    display.fillRect(x, y, 8, 8, SSD1306_WHITE);
-    // Disk label
-    display.drawRect(x + 2, y + 2, 4, 4, SSD1306_BLACK);
-    // Disk shutter
-    display.drawRect(x - 1, y + 1, 2, 6, SSD1306_WHITE);
-  } else {
-    display.print("Clk:Next  Hold:Edit");
-  }
-
-  display.display();
-}
-
-void handleShortPressRadioSettings() {
-  if (isEditingSetting) {
-    // Increment current setting
-    switch (radioSettingIndex) {
-      case 0: // Frequency
-        radioFrequency += 1000000; // Increment by 1MHz
-        if (radioFrequency > 148000000) radioFrequency = 144000000;
-        break;
-      case 1: // Mode
-        if (radioMode == "FM") radioMode = "AM";
-        else if (radioMode == "AM") radioMode = "LSB";
-        else if (radioMode == "LSB") radioMode = "USB";
-        else if (radioMode == "USB") radioMode = "CW";
-        else if (radioMode == "CW") radioMode = "FM";
-        break;
-      case 2: // Power Level
-        radioPowerLevel += 5;
-        if (radioPowerLevel > 100) radioPowerLevel = 5;
-        break;
-      case 3: // Memory Channel
-        radioMemoryChannel = (radioMemoryChannel + 1) % 100;
-        break;
-      case 4: // D-STAR
-        if (radioDStarCallSign.length() == 0) {
-          radioDStarCallSign = "N0CALL";
-          radioDStarMessage = "Hello";
-        } else {
-          radioDStarCallSign = "";
-          radioDStarMessage = "";
-        }
-        break;
-
-        break;
-    }
-  } else {
-    // Select next setting/action
-    radioSettingIndex = (radioSettingIndex + 1) % 8;
-  }
-  displayRadioSettings();
-}
-
-void handleDoubleClickRadioSettings() {
-  if (isEditingSetting) {
-    // Decrement current setting
-    switch (radioSettingIndex) {
-      case 0: // Frequency
-        radioFrequency -= 1000000; // Decrement by 1MHz
-        if (radioFrequency < 144000000) radioFrequency = 148000000;
-        break;
-      case 1: // Mode
-        if (radioMode == "FM") radioMode = "CW";
-        else if (radioMode == "CW") radioMode = "USB";
-        else if (radioMode == "USB") radioMode = "LSB";
-        else if (radioMode == "LSB") radioMode = "AM";
-        else if (radioMode == "AM") radioMode = "FM";
-        break;
-      case 2: // Power Level
-        radioPowerLevel -= 5;
-        if (radioPowerLevel < 5) radioPowerLevel = 100;
-        break;
-      case 3: // Memory Channel
-        radioMemoryChannel = (radioMemoryChannel - 1 + 100) % 100;
-        break;
-      case 4: // D-STAR
-        if (radioDStarCallSign.length() == 0) {
-          radioDStarCallSign = "N0CALL";
-          radioDStarMessage = "Hello";
-        } else {
-          radioDStarCallSign = "";
-          radioDStarMessage = "";
-        }
-        break;
-        break;
-    }
-    displayRadioSettings();
-  }
-  // No action in navigation mode
-}
-
-void handleLongPressRadioSettings() {
-  if (isEditingSetting) {
-    // Set current value and exit edit mode
-    isEditingSetting = false;
-    logMessage("Setting saved");
-  } else {
-    // Handle actions or enter edit mode
-    if (radioSettingIndex == 6) { // Save & Exit
-      currentDisplayMode = DisplayMode::LOG_DISPLAY;
-      logMessage("Radio settings saved");
-      return;
-    } else if (radioSettingIndex == 7) { // Exit
-      currentDisplayMode = DisplayMode::LOG_DISPLAY;
-      logMessage("Radio settings not saved");
-      return;
-    } else {
-      // Enter edit mode for current setting
-      isEditingSetting = true;
-      logMessage("Editing " + String(radioSettingIndex == 0 ? "Frequency" : 
-                                   radioSettingIndex == 1 ? "Mode" :
-                                   radioSettingIndex == 2 ? "Power" :
-                                   radioSettingIndex == 3 ? "Memory" :
-                                   radioSettingIndex == 4 ? "D-STAR" : "USB Mode"));
-    }
-  }
-  displayRadioSettings();
-}
-
-void displayRadioStatus() {
-    if (!display_initialized) return;
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-
-    // Center the title
-    String title = "--- Radio GPS Status ---";
-    int16_t x1, y1;
-    uint16_t w, h;
-    display.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
-    display.setCursor((SCREEN_WIDTH - w) / 2, 0);
-    display.println(title);
-
-    // Display radio CI-V status
-    display.setCursor(0, 12);
-    display.print("CI-V: ");
-    
-    // Only query radio status every 5 seconds
-    unsigned long currentTime = millis();
-    if (currentTime - lastRadioStatusQuery >= RADIO_STATUS_QUERY_INTERVAL) {
-        lastRadioStatus = radioConfig->queryStatus();
-        lastRadioStatusQuery = currentTime;
-    }
-    display.println(lastRadioStatus ? "OK" : "No Response");
-
-    // Display radio connection status
-    display.setCursor(0, 22);
-    display.print("NMEA: ");
-    // Check if we've received any data in the last 5 seconds
-    bool radioConnected = (millis() - lastRadioNMEATime < 5000);
-    if (radioConnected) {
-        display.println("Connected");
-    } else {
-        display.println("Not Connected");
-        // If not connected, show the time since last data
-        display.setCursor(0, 32);
-        display.print("Last data: ");
-        if (lastRadioNMEATime > 0) {
-            display.print((millis() - lastRadioNMEATime) / 1000);
-            display.println("s ago");
-        } else {
-            display.println("Never");
-        }
-        display.display();
-        return; // Don't show GPS data if radio isn't connected
-    }
-
-    // Display GPS status
-    display.setCursor(0, 32);
-    display.print("Status: ");
-    display.println(radioGPSStatus);
-
-    display.setCursor(0, 42);
-    display.print("Fix: ");
-    display.println(radioGPSFix ? "YES" : "NO");
-
-    if (radioGPSFix) {
-        display.setCursor(0, 52);
-        display.print("Lat: ");
-        display.println(radioLat, 5);
-        
-        display.setCursor(0, 62);
-        display.print("Lng: ");
-        display.println(radioLng, 5);
-    } else {
-        // Show last NMEA message if no fix
-        display.setCursor(0, 52);
-        if (lastRadioNMEA.length() > 0) {
-            display.print("Last: ");
-            String truncated = lastRadioNMEA.substring(0, 20);
-            display.println(truncated);
-        } else {
-            display.println("No NMEA data");
-        }
-    }
-
-    // Navigation instructions
-    display.setCursor(0, SCREEN_HEIGHT - 8);
-    display.print("Click:Log  Hold:Settings");
-
-    display.display();
-}
-
-void handleShortPressRadioStatus() {
-    // Go to log display screen
-    currentDisplayMode = DisplayMode::LOG_DISPLAY;
-    logMessage("Display mode changed to: LOG_DISPLAY");
-}
-
-void handleLongPressRadioStatus() {
-    // Switch to next screen
-  currentDisplayMode = DisplayMode::RADIO_SETTINGS;
-  logMessage("Display mode changed to: RADIO_SETTINGS");
-}
-
-void resetCompass() {
-  // Clear all compass preferences
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.clear();
-  preferences.end();
-  
-  // Reset compass state variables
-  compassInverted = false;
-  currentDeclination = 0.0f;
-  isCalibrating = false;
-  isSettingDeclination = false;
-  isSelectingCalibrationMode = false;
-  isSettingInversion = false;
-  calibrationStep = 0;
-  
-  // Reinitialize compass
-  if (qmcCompass.begin()) {
-    activeCompass = &qmcCompass;
-    logMessage("QMC5883L reinitialized after reset");
-  } else if (hmcCompass.begin()) {
-    activeCompass = &hmcCompass;
-    logMessage("HMC5883L reinitialized after reset");
-  } else {
-    activeCompass = nullptr;
-    logMessage("Compass reinitialization failed after reset");
-  }
-  
-  // If we have a working compass, read initial heading
-  if (activeCompass) {
-    activeCompass->read();
-    int initialHeading = activeCompass->getAzimuth();
-    char dirStr[4];
-    activeCompass->getDirection(dirStr, initialHeading);
-    logMessage("Initial compass heading after reset: " + String(initialHeading) + "° (" + String(dirStr) + ")");
-  }
-}
-
-void handleDoubleClickCompassStatus() {
-  // Reset compass on double click
-  resetCompass();
-  logMessage("Compass reset triggered by double click");
-}

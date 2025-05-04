@@ -867,4 +867,68 @@ void ICOM7100Configurator::reportGPSStats() {
         convertedMessages = 0;
         lastStatsReportTime = now;
     }
+}
+
+// UsbRadio Implementation
+UsbRadio::UsbRadio(HardwareSerial& radioUart) : radio(radioUart) {}
+
+void UsbRadio::begin() {
+    // No special setup needed for now
+}
+
+void UsbRadio::loop() {
+    // Bridge USB CDC <-> radio UART
+    // Forward USB->Radio
+    while (Serial.available()) {
+        int c = Serial.read();
+        radio.write((uint8_t)c);
+    }
+    // Forward Radio->USB
+    while (radio.available()) {
+        int c = radio.read();
+        Serial.write((uint8_t)c);
+    }
+}
+
+void UsbRadio::sendCATCommand(const uint8_t* data, size_t len) {
+    radio.write(data, len);
+}
+
+void UsbRadio::sendDVData(const uint8_t* data, size_t len) {
+    radio.write(data, len);
+}
+
+bool UsbRadio::isConnected() {
+    static unsigned long lastCheck = 0;
+    static bool lastResult = false;
+    unsigned long now = millis();
+    if (now - lastCheck < 2000) {
+        return lastResult;
+    }
+    lastCheck = now;
+    // Send a simple ICOM status query (e.g., "FE FE 88 E0 03 FD")
+    uint8_t statusCmd[] = {0xFE, 0xFE, 0x88, 0xE0, 0x03, 0xFD};
+    Serial.write(statusCmd, sizeof(statusCmd));
+    delay(100); // Wait for response
+    uint8_t response[8];
+    int bytesRead = 0;
+    unsigned long startTime = millis();
+    while (millis() - startTime < 200 && bytesRead < sizeof(response)) {
+        if (Serial.available()) {
+            response[bytesRead++] = Serial.read();
+        }
+    }
+    // Check for valid ICOM response (FE FE E0 88 03 XX FD)
+    if (bytesRead >= 7 &&
+        response[0] == 0xFE &&
+        response[1] == 0xFE &&
+        response[2] == 0xE0 &&
+        response[3] == 0x88 &&
+        response[4] == 0x03 &&
+        response[6] == 0xFD) {
+        lastResult = true;
+    } else {
+        lastResult = false;
+    }
+    return lastResult;
 } 
