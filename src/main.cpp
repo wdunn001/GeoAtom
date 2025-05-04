@@ -853,6 +853,17 @@ void setup() {
   // Initialize BLE and Yuma services
   initBLEService();
   initYumaHttpService();
+
+  // Ensure Yuma Almanac is up-to-date if we have internet access
+  if (WiFi.status() == WL_CONNECTED) {
+    if (ensureYumaAlmanacCurrent()) {
+      logMessage("Yuma almanac is up-to-date.");
+    } else {
+      logMessage("Failed to update Yuma almanac (no internet or error).");
+    }
+  } else {
+    logMessage("WiFi not connected, skipping Yuma almanac update.");
+  }
 }
 
 void loop() {

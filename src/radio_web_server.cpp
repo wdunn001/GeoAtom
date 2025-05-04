@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include "ICOM7100Configurator.h"
 #include "main_globals.h"
+#include "yuma_http_service.h"
 
 // Extern declarations for globals/functions from main.cpp
 extern void logMessage(const String& msg);
@@ -73,8 +74,23 @@ String settingsHtml() {
     return html;
 }
 
+void onWiFiEvent(WiFiEvent_t event) {
+    if (event == SYSTEM_EVENT_STA_GOT_IP) {
+        if (!isYumaFileCurrent()) {
+            if (ensureYumaAlmanacCurrent()) {
+                logMessage("Yuma almanac updated after WiFi connect.");
+            } else {
+                logMessage("Failed to update Yuma almanac after WiFi connect (no internet or endpoint unreachable).");
+            }
+        } else {
+            logMessage("Yuma almanac already current after WiFi connect.");
+        }
+    }
+}
 
 void setupWiFiAndWeb() {
+    // Register WiFi event handler
+    WiFi.onEvent(onWiFiEvent);
     // Load saved WiFi credentials
     wifiPrefs.begin(WIFI_PREF_NAMESPACE, true);
     userWifiSSID = wifiPrefs.getString(WIFI_KEY_SSID, "");
