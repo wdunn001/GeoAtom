@@ -6,7 +6,6 @@
 #include "display_graphic_compass.h"
 #include "display_world_map.h"
 #include "display_wifi_status.h"
-#include "display_radio_status.h"
 #include "display_log.h"
 
 // Forward declarations in case headers do not provide them
@@ -15,8 +14,6 @@ void displayCompassStatusOnOLED();
 void displayGraphicCompass();
 void displayWorldMap();
 void displayWiFiStatus();
-void displayRadioStatus();
-void displayLogMessages();
 
 // Externs for state flags and display mode
 extern bool isSettingAltitudeCorrection;
@@ -46,13 +43,10 @@ extern void handleShortPressDeclination();
 extern void handleLongPressDeclination();
 extern void handleShortPressInversion();
 extern void handleLongPressInversion();
-extern void handleShortPressLogDisplay();
-extern void handleLongPressLogDisplay();
-extern void handleShortPressRadioSettings();
-extern void handleLongPressRadioSettings();
-extern void handleDoubleClickRadioSettings();
-extern void handleShortPressRadioStatus();
-extern void handleLongPressRadioStatus();
+extern void handleShortPressWiFiStatus();
+extern void handleLongPressWiFiStatus();
+
+
 // extern void handleShortPressBLEStatus();
 // extern void handleLongPressBLEStatus();
 
@@ -72,7 +66,7 @@ void setupButtonHandlers() {
   buttonHandlerMap[UIState::CALIBRATING_COMPASS] = ButtonHandlers{handleShortPressCalibrating, handleLongPressCalibrating, nullptr};
   buttonHandlerMap[UIState::SETTING_DECLINATION] = ButtonHandlers{handleShortPressDeclination, handleLongPressDeclination, nullptr};
   buttonHandlerMap[UIState::SETTING_INVERSION] = ButtonHandlers{handleShortPressInversion, handleLongPressInversion, nullptr};
-  buttonHandlerMap[UIState::RADIO_STATUS_SCREEN] = ButtonHandlers{handleShortPressRadioStatus, handleLongPressRadioStatus, nullptr};
+  buttonHandlerMap[UIState::WIFI_STATUS_SCREEN] = ButtonHandlers{handleShortPressWiFiStatus, handleLongPressWiFiStatus, nullptr};
   // buttonHandlerMap[UIState::BLE_STATUS_SCREEN] = ButtonHandlers{handleShortPressBLEStatus, handleLongPressBLEStatus, nullptr};
 }
 
@@ -107,11 +101,8 @@ UIState determineCurrentUIState() {
       case DisplayMode::WORLD_MAP:
         detectedState = UIState::WORLD_MAP_SCREEN;
         break;
-      case DisplayMode::LOG_DISPLAY:
-        detectedState = UIState::LOG_DISPLAY;
-        break;
-      case DisplayMode::RADIO_STATUS:
-        detectedState = UIState::RADIO_STATUS_SCREEN;
+      case DisplayMode::WIFI_STATUS:
+        detectedState = UIState::WIFI_STATUS_SCREEN;
         break;
       default:
         detectedState = UIState::GRAPHIC_COMPASS_SCREEN;

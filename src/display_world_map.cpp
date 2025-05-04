@@ -87,7 +87,7 @@ void displayWorldMap() {
   if (!display_initialized) return;
 
   int posX = 0, posY = 0;
-  display.clearDisplay();
+  display.clearBuffer();
   display.drawXBMP(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, world_map);
   if (gps.location.isValid()) {
     float lat = getLatitude();
@@ -127,7 +127,7 @@ void displayWorldMap() {
   if (privacyModeEnabled) {
     display.drawDisc(posX, posY, 3);
   }
-  display.display();
+  display.sendBuffer();
 }
 
 void handleShortPressWorldMap() {

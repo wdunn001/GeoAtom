@@ -24,7 +24,6 @@
 #include "display_graphic_compass.h"
 #include "display_gps_status.h"
 #include "display_log.h"
-#include "display_radio_status.h"
 #include "display_wifi_status.h"
 #include <U8g2lib.h>
 #include "ButtonHandler.h"

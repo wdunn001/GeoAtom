@@ -57,7 +57,7 @@ void displayCompassStatusOnOLED() {
   }
   lastUpdateTime = millis();
 
-  display.clearDisplay();
+  display.clearBuffer();
   setDisplayDefaultStyle();
 
   // Only show calibration mode selection and multi-point calibration for QMC5883L
@@ -257,7 +257,7 @@ void displayCompassStatusOnOLED() {
     }
   }
 
-  display.display();
+  display.sendBuffer();
 }
 
 void handleShortPressCompassStatus() {
