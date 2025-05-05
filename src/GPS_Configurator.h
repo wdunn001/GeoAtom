@@ -58,6 +58,10 @@ public:
     // Returns true if the command was sent.
     bool reset();
 
+    // Performs a factory reset specific to M10 GPS modules
+    // Returns true if the command was sent.
+    bool m10FactoryReset();
+
 private:
     HardwareSerial& _gps_serial; // Reference to the GPS serial port
 

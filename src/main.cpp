@@ -468,54 +468,101 @@ void setup() {
     logMessage("[DEBUG] After radioConfig->initialize()");
     logMessage("System initializing...");
     // --- Initialize GPS with Configuration --- 
-    logMessage("Initializing GPS module...");
-    gpsBaudRate = 9600; // Set to 9600 baud to match radio
+    logMessage("Initializing GPS module (UBlox M10)...");
+    gpsBaudRate = 9600; // Default for M10 is 9600 baud
     bool gpsInitSuccess = false;
     // Basic GPS serial start needed before configuration
     GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
     delay(100); // Small delay for serial port
     logMessage("[DEBUG] After GPS.begin");
     if (GPS) {
-        logMessage("GPS Serial Port OK. Configuring NMEA...");
+        logMessage("GPS Serial Port OK. Configuring...");
+        
+        // Give a bit more time for the M10 to initialize
+        delay(500);
+        
+        // Create a specialized GPS configurator for M10
         GPSConfigurator gpsConfig(GPS);
-        if (!gpsConfig.setBaudRate(gpsBaudRate)) {
-            logMessage("Failed to set GPS baud rate (continuing)");
+        
+        // Try M10 factory reset first for clean configuration
+        if (gpsConfig.m10FactoryReset()) {
+            logMessage("M10 factory reset sent successfully");
+            delay(1000); // Give time for reset to complete
         }
-        delay(GPS_CONFIG_RETRY_DELAY);
-        if (!gpsConfig.setUpdateRateHz(1)) {
-            logMessage("Failed to set GPS update rate (continuing)");
-        }
-        delay(GPS_CONFIG_RETRY_DELAY);
-        if (!gpsConfig.setDynamicModel(0)) {
-            logMessage("Failed to set GPS dynamic model (continuing)");
-        }
-        delay(GPS_CONFIG_RETRY_DELAY);
-        logMessage("Attempting to enable NMEA Messages...");
+        
+        // M10 Series - Configure NMEA messages
+        // Enable the main NMEA messages we need
         const uint8_t nmeaClass = 0xF0;
-        const uint8_t msgIds[] = {0x00, 0x04, 0x05, 0x02, 0x03, 0x01};
-        const char* msgNames[] = {"GGA", "RMC", "VTG", "GSA", "GSV", "GLL"};
+        // NMEA message IDs
+        // RMC=0x04, GGA=0x00, GSA=0x02, GSV=0x03, VTG=0x05, GLL=0x01
+        const uint8_t msgIds[] = {0x00, 0x04, 0x02, 0x03, 0x05, 0x01};
+        const char* msgNames[] = {"GGA", "RMC", "GSA", "GSV", "VTG", "GLL"};
+        
         bool anyNmeaFail = false;
         for (size_t i = 0; i < sizeof(msgIds) / sizeof(msgIds[0]); ++i) {
             logMessage("  Sending enable command for: " + String(msgNames[i]) + "...");
-            if (gpsConfig.enableNmeaMessage(nmeaClass, msgIds[i], true)) {
-                logMessage("    -> Command sent successfully.");
-            } else {
-                logMessage("ERROR: Failed to *send* enable command for " + String(msgNames[i]));
-                anyNmeaFail = true;
+            // Each retry is important for M10
+            for (int retry = 0; retry < 3; retry++) {
+                if (gpsConfig.enableNmeaMessage(nmeaClass, msgIds[i], true)) {
+                    logMessage("    -> Command sent successfully.");
+                    break;
+                } else if (retry == 2) {
+                    logMessage("ERROR: Failed to *send* enable command for " + String(msgNames[i]));
+                    anyNmeaFail = true;
+                }
+                delay(100); // Delay between retries
             }
-            delay(GPS_CONFIG_RETRY_DELAY / 2);
         }
-        if (anyNmeaFail) {
-            logMessage("Warning: Failed to *send* one or more NMEA enable commands.");
-        } else {
-            logMessage("All NMEA enable commands sent successfully.");
+        
+        // Set navigation update rate for M10 (1Hz is standard)
+        if (!gpsConfig.setUpdateRateHz(1)) {
+            logMessage("Failed to set GPS update rate (continuing)");
+            // Try alternative method if the first attempt fails
+            delay(100);
+            if (!gpsConfig.setUpdateRateHz(1)) {
+                logMessage("Second attempt to set GPS rate also failed");
+            }
         }
-        logMessage("Attempting to save GPS configuration...");
-        if (gpsConfig.saveConfiguration()) {
-            logMessage("GPS configuration save command sent.");
-            gpsInitSuccess = true;
-        } else {
-            logMessage("Failed to send save GPS configuration command.");
+        
+        // For M10, dynamic platform model 0 = portable (per integration manual p.14)
+        // This is optimal for low-acceleration applications
+        if (!gpsConfig.setDynamicModel(0)) {
+            logMessage("Failed to set GPS dynamic model (continuing)");
+            // Try alternative or retry
+            delay(100);
+            if (!gpsConfig.setDynamicModel(0)) {
+                logMessage("Second attempt to set dynamic model also failed");
+            }
+        }
+        
+        // Save configuration to BBR and flash (M10 requires multiple save attempts)
+        // Try multiple times for M10 which can be finnicky
+        bool saveSuccess = false;
+        for (int i = 0; i < 3; i++) {
+            if (gpsConfig.saveConfiguration()) {
+                logMessage("GPS configuration saved successfully.");
+                saveSuccess = true;
+                break;
+            }
+            delay(300); // Longer delay between save attempts
+        }
+        
+        if (!saveSuccess) {
+            logMessage("Warning: Failed to save GPS configuration.");
+        }
+        
+        // Apply a hardware reset after configuration to ensure all settings are applied
+        if (gpsConfig.reset()) {
+            logMessage("GPS reset sent successfully to apply all settings");
+            delay(1000); // Allow time for the reset to complete
+        }
+        
+        // Set success flag if we at least got the serial port working
+        gpsInitSuccess = true;
+        
+        // Flush any pending data
+        while (GPS.available()) {
+            GPS.read();
         }
     } else {
         logMessage("*** ERROR: Failed to open GPS Serial Port! ***");
@@ -523,10 +570,11 @@ void setup() {
     }
     gpsInitialized = gpsInitSuccess;
     if (gpsInitialized) {
-        logMessage("GPS initialization sequence complete (check logs for details).");
+        logMessage("GPS initialization complete. Waiting for satellite fix...");
     } else {
-        logMessage("*** WARNING: GPS initialization sequence failed or incomplete. ***");
+        logMessage("*** WARNING: GPS initialization failed or incomplete. ***");
     }
+    // --- End GPS Initialization ---
     logMessage("[DEBUG] After GPS init");
     // Try to initialize compass
     if (qmcCompass.begin()) {
