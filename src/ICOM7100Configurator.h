@@ -22,6 +22,15 @@ private:
     unsigned long convertedMessages = 0;    // Successfully converted GPS messages
     unsigned long lastStatsReportTime = 0;
     const unsigned long STATS_REPORT_INTERVAL = 10000; // 10 seconds
+    
+    // Track if we are using backup data
+    bool _usingBackupData = false;
+    unsigned long lastRealMessageTime = 0;
+    const unsigned long MSG_TIMEOUT = 3000; // Timeout for receiving real messages
+    
+    // Store last generated NMEA messages for backup
+    String _lastGGA = "";
+    String _lastRMC = "";
 
     // Helper function to send command with checksum
     void sendCommand(const String& cmd);
@@ -45,6 +54,13 @@ public:
     void disableGPSDisplay();
     void setGPSBaudRate(int rate);
     void forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorrection = 0);
+    
+    // Check if backup data is being used
+    bool isUsingBackupData() { return _usingBackupData; }
+    
+    // Get the last generated NMEA messages (for backup mode)
+    String getLastGeneratedGGA() { return _lastGGA; }
+    String getLastGeneratedRMC() { return _lastRMC; }
     
     // Memory Operations
     void recallMemory(int channel);

@@ -117,10 +117,10 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
     // If we haven't received real GSV/GSA messages for a while, generate them
     // This ensures the radio always has satellite data even if the GPS module
     // temporarily doesn't provide it
-    bool useBackupMessages = (now - lastRealMessageTime > MSG_TIMEOUT) || 
-                            (!gsvReceived && !gsaReceived);
+    _usingBackupData = (now - lastRealMessageTime > MSG_TIMEOUT) || 
+                      (!gsvReceived && !gsaReceived);
     
-    if (useBackupMessages && (now - lastGSVTime >= GSV_INTERVAL)) {
+    if (_usingBackupData && (now - lastGSVTime >= GSV_INTERVAL)) {
         logMessage("No real GPS messages received recently. Using backup data with sat count: " + String(satCount));
         
         // Generate GSV and GSA messages with consistent satellite count
@@ -242,6 +242,9 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
         radio.print(ggaMessage);
         ggaMessagesSent++;
         
+        // Store the last GGA message for backup feeding to TinyGPS++
+        _lastGGA = ggaMessage;
+        
         // Track message quality
         if (!hasValidData) {
             nullMessages++;
@@ -358,6 +361,9 @@ void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorr
         // Send RMC message
         radio.print(rmcMessage);
         rmcMessagesSent++;
+        
+        // Store the last RMC message for backup feeding to TinyGPS++
+        _lastRMC = rmcMessage;
         
         // Track message quality for RMC
         if (!hasValidData) {

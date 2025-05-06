@@ -17,6 +17,7 @@
 #include <WebServer.h>
 #include <esp_wifi.h>
 #include <DNSServer.h>
+#include <M5Unified.h> // Added M5Unified library
 #include "radio_web_server.h"
 #include "display_world_map.h"
 #include "display_compass_status.h"
@@ -192,7 +193,12 @@ void logMessage(const String& msg) {
     } else {
         log_batch.push_back(msg);
     }
- //   Serial.println(msg); // Log to Serial
+    
+    // Use M5 logging (needs conversion to c_str() for const char*)
+    M5.Log.println(msg.c_str()); // Log using M5Unified
+    
+    // Keep Serial logging commented as it was before
+    // Serial.println(msg); // Log to Serial
 }
 
 void flushLogMessages() {
@@ -439,6 +445,13 @@ bool ignoreNextRelease = false;
 void setup() {
     //Serial.begin(115200);
     //delay(100); // Give time for USB CDC to initialize
+    
+    // Initialize M5Unified before using its logging capabilities
+    M5.begin();
+    
+    // Configure M5 logger (skipping unsupported methods)
+    // M5.Log is automatically enabled with M5.begin()
+    
     logMessage("[DEBUG] Entered setup()");
     // Initialize I2C
     Wire.begin(I2C_SDA, I2C_SCL);
@@ -690,19 +703,76 @@ void loop() {
   // Process any available GPS data
   if (gpsInitialized) {
     while (GPS.available()) {
-      gps.encode(GPS.read());
+      char c = GPS.read();
+      if (gps.encode(c)) {
+        // Debug when a complete sentence is successfully parsed
+        static unsigned long lastGPSDebugTime = 0;
+        if (millis() - lastGPSDebugTime > 5000) { // Debug GPS data every 5 seconds
+          lastGPSDebugTime = millis();
+          
+          // Log GPS data status
+          String debug = "GPS Data: ";
+          debug += "Valid: " + String(gps.location.isValid() ? "Yes" : "No");
+          debug += ", Lat: " + String(gps.location.lat(), 6);
+          debug += ", Lng: " + String(gps.location.lng(), 6);
+          debug += ", Alt: " + String(gps.altitude.meters(), 1);
+          debug += ", Sats: " + String(gps.satellites.value());
+          logMessage(debug);
+          
+          // Additional debug for backup data handling
+          if (radioConfig && radioConfig->isUsingBackupData()) {
+            logMessage("Using backup data. Packets may not be processed by TinyGPS++");
+          }
+        }
+      }
     }
     
     // Forward NMEA messages based on configuration
     if (radioConfig != nullptr) {
       // Always forward to radio
       radioConfig->forwardNMEAToRadio(gps, altitudeCorrection);
+      
+      // If we're using backup data, capture recent messages and feed them to TinyGPS++
+      static bool lastBackupStatus = false;
+      
+      if (radioConfig->isUsingBackupData()) {
+        static unsigned long lastBackupFeedTime = 0;
+        
+        if (!lastBackupStatus) {
+          // Log when we first switch to backup mode
+          logMessage("Switching to GPS backup data mode");
+          lastBackupStatus = true;
+        }
+        
+        if (millis() - lastBackupFeedTime > 1000) { // Process backup data every second
+          lastBackupFeedTime = millis();
+          
+          // Get the last generated backup messages from radioConfig
+          String lastGGA = radioConfig->getLastGeneratedGGA();
+          String lastRMC = radioConfig->getLastGeneratedRMC();
+          
+          // Feed these messages to TinyGPS++ so it can update its state
+          if (lastGGA.length() > 0) {
+            for (size_t i = 0; i < lastGGA.length(); i++) {
+              gps.encode(lastGGA[i]);
+            }
+          }
+          
+          if (lastRMC.length() > 0) {
+            for (size_t i = 0; i < lastRMC.length(); i++) {
+              gps.encode(lastRMC[i]);
+            }
+          }
+        }
+      } else {
+        // Reset backup status flag when we're not in backup mode
+        if (lastBackupStatus) {
+          logMessage("Returning to normal GPS data mode");
+          lastBackupStatus = false;
+        }
+      }
     }
   }
-
-
-
-  
 
   // Update speed history every 500ms
   static unsigned long lastSpeedUpdate = 0;

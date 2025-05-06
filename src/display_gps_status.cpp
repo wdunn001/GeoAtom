@@ -3,6 +3,7 @@
 #include <Preferences.h>
 #include "display_manager.h"
 #include "main_globals.h"
+#include "ICOM7100Configurator.h"
 
 // Externs for globals used in these functions
 extern U8G2_SSD1306_128X64_NONAME_F_HW_I2C display;
@@ -19,6 +20,7 @@ extern Preferences preferences;
 extern const char* PREF_NAMESPACE;
 extern const char* KEY_ALT_CORRECTION;
 extern bool isSettingAltitudeCorrection;
+extern ICOM7100Configurator* radioConfig;
 
 void displayGPSStatusOnOLED() {
   if (!display_initialized) return;
@@ -61,7 +63,13 @@ void displayGPSStatusOnOLED() {
       if (tempProtocol.length() > 0) tempProtocol += "GLL "; 
       
       if (tempProtocol.length() == 0) tempProtocol = "NMEA";
-      displayedGpsProtocol = tempProtocol + String(gpsBaudRate);
+      
+      // Add backup data indicator if using backup
+      if (radioConfig && radioConfig->isUsingBackupData()) {
+        displayedGpsProtocol = tempProtocol + String(gpsBaudRate) + " [BACKUP]";
+      } else {
+        displayedGpsProtocol = tempProtocol + String(gpsBaudRate);
+      }
     } else {
       displayedGpsProtocol = "No GPS data";
     }
@@ -91,10 +99,15 @@ void displayGPSStatusOnOLED() {
     display.drawStr(0, 36, "Lng No Fix");
   }
   
-  // Display satellite count
+  // Display satellite count with backup indicator if needed
   display.setCursor(0, 44); // Adjusted Y position
   display.drawStr(0, 44, "Sat ");
-  display.drawStr(24, 44, String(gps.satellites.value()).c_str());
+  if (radioConfig && radioConfig->isUsingBackupData()) {
+    display.drawStr(24, 44, String(gps.satellites.value()).c_str());
+    display.drawStr(32, 44, "(B)"); // Backup indicator
+  } else {
+    display.drawStr(24, 44, String(gps.satellites.value()).c_str());
+  }
   
   // Display altitude with correction
   if (gps.altitude.isValid()) {
@@ -123,10 +136,17 @@ void displayGPSStatusOnOLED() {
     lastErrorTime = currentTime;
   }
 
-  display.drawStr(0, 52, "Pkt/s ");
-  display.drawStr(24, 52, String(packetsPerSecond, 1).c_str());
-  display.drawStr(48, 52, " Err/s ");
-  display.drawStr(64, 52, String(errorsPerSecond, 1).c_str());
+  // Show packet stats with backup indicator
+  if (radioConfig && radioConfig->isUsingBackupData()) {
+    // When in backup mode, show backup status instead of packet errors
+    display.drawStr(0, 52, "Backup mode active");
+  } else {
+    // Normal display with packet and error rates
+    display.drawStr(0, 52, "Pkt/s ");
+    display.drawStr(24, 52, String(packetsPerSecond, 1).c_str());
+    display.drawStr(48, 52, " Err/s ");
+    display.drawStr(64, 52, String(errorsPerSecond, 1).c_str());
+  }
 
   // Display course and speed in a single line
   if (gps.course.isValid() && gps.speed.isValid()) {
