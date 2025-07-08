@@ -1,4 +1,5 @@
 #include "GPS_Configurator.h"
+#include <Arduino.h>
 
 // --- UBX Command Definitions (from documentation) ---
 // Note: Some commands in the doc might have multiple parts or need dynamic generation.
@@ -232,4 +233,89 @@ bool GPSConfigurator::reset() {
 bool GPSConfigurator::m10FactoryReset() {
     sendUbxCommand(UBX_M10_FACTORY_RESET, sizeof(UBX_M10_FACTORY_RESET));
     return true;
+}
+
+bool GPSConfigurator::setUartOutputToNMEA() {
+    // UBX-CFG-PRT for UART1, outProtoMask = 0x01 (NMEA only), baud = 115200
+    uint8_t cmd[] = {
+        0xB5, 0x62, 0x06, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0xD0, 0x08, 0x00, 0x00, 0xC2, 0x01, 0x00, 0x00, 0x01, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    // This command sets UART1 to 115200 baud, NMEA only
+    sendUbxCommand(cmd, sizeof(cmd));
+    return true;
+}
+
+bool GPSConfigurator::init() {
+    // Factory reset
+    m10FactoryReset();
+    delay(1000);
+    // Enable NMEA messages
+    const uint8_t nmeaClass = 0xF0;
+    const uint8_t msgIds[] = {0x00, 0x04, 0x02, 0x03, 0x05, 0x01};
+    for (size_t i = 0; i < sizeof(msgIds) / sizeof(msgIds[0]); ++i) {
+        for (int retry = 0; retry < 3; retry++) {
+            if (enableNmeaMessage(nmeaClass, msgIds[i], true)) break;
+            delay(100);
+        }
+    }
+    // Set update rate to 1Hz
+    setUpdateRateHz(1);
+    delay(100);
+    // Set dynamic model to portable (0)
+    setDynamicModel(0);
+    delay(100);
+    // Save configuration
+    for (int i = 0; i < 3; i++) {
+        if (saveConfiguration()) break;
+        delay(300);
+    }
+    // Reset GPS to apply settings
+    reset();
+    delay(1000);
+    // Flush any pending data
+    while (_gps_serial.available()) {
+        _gps_serial.read();
+    }
+    return true;
+}
+
+uint32_t GPSConfigurator::autoDetectBaudRate() {
+    // List of common baud rates supported by u-blox M10
+    const uint32_t baudRates[] = {4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600};
+    const size_t numRates = sizeof(baudRates) / sizeof(baudRates[0]);
+    char nmeaLine[100];
+    for (size_t i = 0; i < numRates; ++i) {
+        uint32_t baud = baudRates[i];
+        _gps_serial.updateBaudRate(baud);
+        delay(100);
+        unsigned long start = millis();
+        size_t idx = 0;
+        bool found = false;
+        while (millis() - start < 1500) { // Listen for 1.5 seconds
+            while (_gps_serial.available()) {
+                char c = _gps_serial.read();
+                if (c == '\n' || c == '\r') {
+                    nmeaLine[idx] = '\0';
+                    if (idx > 6 && nmeaLine[0] == '$') {
+                        // Simple NMEA checksum validation
+                        char* star = strchr(nmeaLine, '*');
+                        if (star && strlen(star) >= 3) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    idx = 0;
+                } else if (idx < sizeof(nmeaLine) - 1) {
+                    nmeaLine[idx++] = c;
+                }
+            }
+            if (found) break;
+        }
+        if (found) {
+            return baud;
+        }
+    }
+    return 0; // Not found
 }

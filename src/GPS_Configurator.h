@@ -62,6 +62,15 @@ public:
     // Returns true if the command was sent.
     bool m10FactoryReset();
 
+    // Ensures UART1 outputs NMEA sentences (and disables UBX if desired)
+    bool setUartOutputToNMEA();
+
+    // Performs full GPS initialization and configuration
+    bool init();
+
+    // Attempts to auto-detect the GPS baud rate by scanning for valid NMEA sentences
+    uint32_t autoDetectBaudRate();
+
 private:
     HardwareSerial& _gps_serial; // Reference to the GPS serial port
 

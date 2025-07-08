@@ -4,6 +4,7 @@
 #include "CompassInterface.h"
 #include <vector>
 #include <String>
+#include <set>
 #include <Preferences.h>
 #include "GPS_Configurator.h"
 #include "ICOM7100Configurator.h"  // Add new include
@@ -52,37 +53,12 @@ void applyPrivacyFilter(); // Stub - Replaced by getLatitude() and getLongitude(
 void displayWiFiStatus();
 // Add this function to draw a more prominent privacy indicator
 void drawPrivacyIndicator(U8G2 &display) {
-  extern bool privacyModeEnabled;
-  if (privacyModeEnabled) {
-    int x = display.getWidth() - 10;
-    int y = 2;
-    // Lock body
-    display.drawBox(x, y + 3, 8, 6);
-    // Lock shackle
-    display.drawFrame(x + 1, y, 6, 4);
-    // Optional: "P" for privacy (draw a simple P shape)
-    display.setDrawColor(0);
-    display.drawPixel(x + 2, y + 5);
-    display.drawPixel(x + 3, y + 4);
-    display.drawPixel(x + 4, y + 5);
-    display.drawPixel(x + 3, y + 6);
-    display.drawPixel(x + 2, y + 7);
-    display.setDrawColor(1);
-  }
+  // Empty stub - display functionality disabled
 }
 
 // Add this function to draw a save icon
 void drawSaveIcon(U8G2 &display) {
-  int x = display.getWidth() - 10;
-  int y = 2;
-  // Disk body
-  display.drawBox(x, y, 8, 8);
-  // Disk label
-  display.setDrawColor(0);
-  display.drawFrame(x + 2, y + 2, 4, 4);
-  display.setDrawColor(1);
-  // Disk shutter
-  display.drawFrame(x - 1, y + 1, 2, 6);
+  // Empty stub - display functionality disabled
 }
 
 // GPS setup
@@ -169,12 +145,12 @@ const char* KEY_RADIO_USB_MODE = "radioUsbMode";     // Key for Radio USB mode
 #define I2C_SCL 21 // Grove Pin 2
 
 // GPS module connections (BN-880 UART)
-#define GPS_RX 23 // ESP32 RX pin connected to BN-880 TX
-#define GPS_TX 33  // ESP32 TX pin connected to BN-880 RX
+#define GPS_RX 22 // ESP32 RX pin connected to BN-880 TX
+#define GPS_TX 19  // ESP32 TX pin connected to BN-880 RX
 
 // TTL to RS232 level converter connections (Optional Radio Output)
-#define RADIO_RX 19  // ESP32 RX pin connected to TTL TX
-#define RADIO_TX 22  // ESP32 TX pin connected to TTL RX
+#define RADIO_RX 23  // ESP32 RX pin connected to TTL TX
+#define RADIO_TX 33  // ESP32 TX pin connected to TTL RX
 // --------------------------------------------------------------
 
 // Create ICOM7100 configurator instance
@@ -185,6 +161,13 @@ static std::deque<String> log_batch;
 static String lastMagnetoMsg = "";
 static unsigned long lastLogFlush = 0;
 const unsigned long LOG_FLUSH_INTERVAL = 2000; // ms
+
+// --- Global NMEA sentence buffers for radio forwarding ---
+String latestGGA = "";
+String latestRMC = "";
+String latestGSA = "";
+std::vector<String> gsvBuffer; // Buffer for all GSV sentences in a cycle
+bool hasValidGSVs = false;  // Add this variable for tracking valid GSV messages
 
 void logMessage(const String& msg) {
     // Only keep the last magnetometer message in the batch
@@ -456,21 +439,11 @@ void setup() {
     // Initialize I2C
     Wire.begin(I2C_SDA, I2C_SCL);
     logMessage("[DEBUG] After Wire.begin");
-    logMessage("Initializing display...");
-    if (!display.begin()) {
-        logMessage("SSD1306 allocation failed");
-    } else {
-        display_initialized = true;
-        display.clearBuffer();
-        display.setFont(u8g2_font_ncenB08_tr);
-        display.drawStr(0, 10, "System Ready");
-        display.sendBuffer();
-    }
-    display_initialized = true;
-    display.clearBuffer();
-    display.setFont(u8g2_font_ncenB08_tr);
-    display.drawStr(0, 10, "System Ready");
-    display.sendBuffer();
+    logMessage("Display disabled - skipping initialization");
+    
+    // Set display_initialized to false to disable display functionality
+    display_initialized = false;
+    
     logMessage("[DEBUG] After display init");
     // Initialize Radio serial for NMEA data only
     Radio.begin(9600, SERIAL_8N1, RADIO_RX, RADIO_TX);
@@ -482,7 +455,7 @@ void setup() {
     logMessage("System initializing...");
     // --- Initialize GPS with Configuration --- 
     logMessage("Initializing GPS module (UBlox M10)...");
-    gpsBaudRate = 9600; // Default for M10 is 9600 baud
+    gpsBaudRate = 115200; // Set to 115200 for M100-5883 GPS
     bool gpsInitSuccess = false;
     // Basic GPS serial start needed before configuration
     GPS.begin(gpsBaudRate, SERIAL_8N1, GPS_RX, GPS_TX);
@@ -490,89 +463,14 @@ void setup() {
     logMessage("[DEBUG] After GPS.begin");
     if (GPS) {
         logMessage("GPS Serial Port OK. Configuring...");
-        
-        // Give a bit more time for the M10 to initialize
         delay(500);
-        
-        // Create a specialized GPS configurator for M10
         GPSConfigurator gpsConfig(GPS);
-        
-        // Try M10 factory reset first for clean configuration
-        if (gpsConfig.m10FactoryReset()) {
-            logMessage("M10 factory reset sent successfully");
-            delay(1000); // Give time for reset to complete
-        }
-        
-        // M10 Series - Configure NMEA messages
-        // Enable the main NMEA messages we need
-        const uint8_t nmeaClass = 0xF0;
-        // NMEA message IDs
-        // RMC=0x04, GGA=0x00, GSA=0x02, GSV=0x03, VTG=0x05, GLL=0x01
-        const uint8_t msgIds[] = {0x00, 0x04, 0x02, 0x03, 0x05, 0x01};
-        const char* msgNames[] = {"GGA", "RMC", "GSA", "GSV", "VTG", "GLL"};
-        
-        bool anyNmeaFail = false;
-        for (size_t i = 0; i < sizeof(msgIds) / sizeof(msgIds[0]); ++i) {
-            logMessage("  Sending enable command for: " + String(msgNames[i]) + "...");
-            // Each retry is important for M10
-            for (int retry = 0; retry < 3; retry++) {
-                if (gpsConfig.enableNmeaMessage(nmeaClass, msgIds[i], true)) {
-                    logMessage("    -> Command sent successfully.");
-                    break;
-                } else if (retry == 2) {
-                    logMessage("ERROR: Failed to *send* enable command for " + String(msgNames[i]));
-                    anyNmeaFail = true;
-                }
-                delay(100); // Delay between retries
-            }
-        }
-        
-        // Set navigation update rate for M10 (1Hz is standard)
-        if (!gpsConfig.setUpdateRateHz(1)) {
-            logMessage("Failed to set GPS update rate (continuing)");
-            // Try alternative method if the first attempt fails
-            delay(100);
-            if (!gpsConfig.setUpdateRateHz(1)) {
-                logMessage("Second attempt to set GPS rate also failed");
-            }
-        }
-        
-        // For M10, dynamic platform model 0 = portable (per integration manual p.14)
-        // This is optimal for low-acceleration applications
-        if (!gpsConfig.setDynamicModel(0)) {
-            logMessage("Failed to set GPS dynamic model (continuing)");
-            // Try alternative or retry
-            delay(100);
-            if (!gpsConfig.setDynamicModel(0)) {
-                logMessage("Second attempt to set dynamic model also failed");
-            }
-        }
-        
-        // Save configuration to BBR and flash (M10 requires multiple save attempts)
-        // Try multiple times for M10 which can be finnicky
-        bool saveSuccess = false;
-        for (int i = 0; i < 3; i++) {
-            if (gpsConfig.saveConfiguration()) {
-                logMessage("GPS configuration saved successfully.");
-                saveSuccess = true;
-                break;
-            }
-            delay(300); // Longer delay between save attempts
-        }
-        
-        if (!saveSuccess) {
-            logMessage("Warning: Failed to save GPS configuration.");
-        }
-        
-        // Apply a hardware reset after configuration to ensure all settings are applied
-        if (gpsConfig.reset()) {
-            logMessage("GPS reset sent successfully to apply all settings");
-            delay(1000); // Allow time for the reset to complete
-        }
-        
-        // Set success flag if we at least got the serial port working
+        logMessage("Initializing and configuring GPS module via GPSConfigurator::init()...");
+        uint32_t detectedBaud = gpsConfig.autoDetectBaudRate();
+        logMessage("Detected GPS baud rate: " + String(detectedBaud));
+        delay(500);
+        //gpsConfig.init();
         gpsInitSuccess = true;
-        
         // Flush any pending data
         while (GPS.available()) {
             GPS.read();
@@ -618,11 +516,7 @@ void setup() {
     logMessage("M5 Smoothing: " + String(useM5StackSmoothing ? "ON" : "OFF"));
     logMessage("M5 Interference: " + String(useM5StackInterference ? "ON" : "OFF"));
     logMessage("-----------------------");
-    display.clearBuffer();
-    display.setFont(u8g2_font_ncenB08_tr);
-    display.drawStr(0, 10, "System Ready");
-    display.sendBuffer();
-    delay(1000);
+    
     logMessage("[DEBUG] After display ready message");
     setupButtonHandlers();
     logMessage("[DEBUG] After setupButtonHandlers");
@@ -651,7 +545,11 @@ void setup() {
 void loop() {
   buttonHandler.update();
   UIState currentUIState = getCurrentUIState();
-  updateDisplayForCurrentMode();
+  
+  // Only update display if it's initialized
+  if (display_initialized) {
+    updateDisplayForCurrentMode();
+  }
 
   // Handle button presses based on current UI state
   if (buttonHandler.wasLongPress()) {
@@ -700,16 +598,182 @@ void loop() {
     lastCompassUpdate = millis();
   }
 
+  // Log compass info every 5 seconds
+  static unsigned long lastCompassLog = 0;
+  if (activeCompass != nullptr && millis() - lastCompassLog > 5000) {
+    logMessage("Compass Info: " + activeCompass->getSensorInfoString());
+    lastCompassLog = millis();
+  }
+
   // Process any available GPS data
   if (gpsInitialized) {
+    static String nmeaLine = "";
+    static unsigned long gpsCharCount = 0;
+    static unsigned long lastCharStatsTime = 0;
+    static unsigned long charsPerSecond = 0;
     while (GPS.available()) {
       char c = GPS.read();
+      gpsCharCount++;
+      if (c == '\n' || c == '\r') {
+        if (nmeaLine.startsWith("$") && nmeaLine.length() > 6) {
+          logMessage("GPS RAW: " + nmeaLine);
+          String type = nmeaLine.substring(3, 6);
+          if (type == "GSV") {
+            // Store GSV message in buffer for satellite data
+            // Check if this is the start of a new GSV set
+            int comma1 = nmeaLine.indexOf(',', 7); // after $GPGSV,
+            int comma2 = nmeaLine.indexOf(',', comma1 + 1);
+            int comma3 = nmeaLine.indexOf(',', comma2 + 1);
+            
+            if (comma1 > 0 && comma2 > comma1 && comma3 > comma2) {
+              int totalMsgs = nmeaLine.substring(7, comma1).toInt();
+              int msgNum = nmeaLine.substring(comma1 + 1, comma2).toInt();
+              int totalSats = nmeaLine.substring(comma2 + 1, comma3).toInt();
+              
+              // If this is the first message in a set, log it and clear buffer if it's a new set
+              if (msgNum == 1) {
+                logMessage("Starting new GSV set with " + String(totalMsgs) + " messages, " + String(totalSats) + " satellites");
+                gsvBuffer.clear(); // Only clear the buffer at the start of a new set
+              }
+              
+              // Always add the GSV message to the buffer, even if totalSats is 0
+              // ICOM 7100 needs GSV messages even with 0 satellites for proper display
+              gsvBuffer.push_back(nmeaLine);
+              
+              // Only forward complete GSV sets
+              if (msgNum == totalMsgs) {
+                logMessage("Completed GSV set with " + String(gsvBuffer.size()) + " messages");
+                
+                // Filter and improve GSV data for more consistent display
+                if (gsvBuffer.size() > 0 && totalSats > 0) {
+                  // Count how many satellites have actual signal strength values
+                  int satellitesWithSignal = 0;
+                  
+                  // Process each GSV message to ensure it has the correct talker ID
+                  // and count satellites with valid signal strength
+                  for (int i = 0; i < gsvBuffer.size(); i++) {
+                    String currentGSV = gsvBuffer[i];
+                    
+                    // Count satellites with signal strength in this message
+                    int commaCount = 0;
+                    bool hasSignalStrength = false;
+                    
+                    // Each satellite has 4 fields (PRN,elevation,azimuth,SNR)
+                    // Check for valid signal strength values in SNR fields
+                    for (int j = 0; j < currentGSV.length(); j++) {
+                      if (currentGSV[j] == ',') {
+                        commaCount++;
+                        // Signal strength fields are the 4th, 8th, 12th, and 16th fields
+                        if (commaCount == 7 || commaCount == 11 || commaCount == 15 || commaCount == 19) {
+                          int nextComma = currentGSV.indexOf(',', j + 1);
+                          int nextStar = currentGSV.indexOf('*', j + 1);
+                          int endPos = (nextComma > 0) ? nextComma : nextStar;
+                          
+                          if (endPos > j + 1) {
+                            String snrValue = currentGSV.substring(j + 1, endPos);
+                            if (snrValue.length() > 0 && snrValue.toInt() > 0) {
+                              satellitesWithSignal++;
+                              hasSignalStrength = true;
+                            }
+                          }
+                        }
+                      }
+                    }
+                    
+                    // If the talker ID isn't GP, we need to convert to GPGSV for ICOM compatibility
+                    if (!currentGSV.startsWith("$GP")) {
+                      // Keep the original prefix, don't convert
+                    }
+                  }
+                  
+                  // Only mark the dataset as valid if there are actual satellites with signal
+                  if (satellitesWithSignal > 0) {
+                    logMessage("Found " + String(satellitesWithSignal) + " satellites with signal strength");
+                    hasValidGSVs = true;
+                  } else {
+                    logMessage("No satellites with signal strength in this GSV set");
+                    hasValidGSVs = false;
+                  }
+                  
+                  // Forward NMEA to radio once we have a complete GSV set with signal data
+                  if (hasValidGSVs && radioConfig != nullptr) {
+                    radioConfig->forwardNMEAToRadio(gps, altitudeCorrection, charsPerSecond);
+                  }
+                } else {
+                  hasValidGSVs = false;
+                  logMessage("No valid GSV satellites found, skipping set");
+                }
+              }
+            } else {
+              logMessage("Invalid GSV message format: " + nmeaLine);
+            }
+          }
+          else if (type == "GGA") {
+            // Patch the satellite count field to match gps.satellites.value()
+            int firstComma = nmeaLine.indexOf(',');
+            int field = 0, idx = 0, lastIdx = 0;
+            String patchedGGA = "";
+            while (field < 7 && idx != -1) {
+              idx = nmeaLine.indexOf(',', lastIdx);
+              if (idx == -1) break;
+              patchedGGA += nmeaLine.substring(lastIdx, idx + 1);
+              lastIdx = idx + 1;
+              field++;
+            }
+            // Insert the correct satellite count
+            patchedGGA += String(gps.satellites.value());
+            // Find the next comma after the sat count field
+            int nextComma = nmeaLine.indexOf(',', lastIdx);
+            if (nextComma != -1) {
+              // Append the rest of the GGA sentence after the sat count
+              patchedGGA += nmeaLine.substring(nextComma);
+            }
+            // Recalculate and update the NMEA checksum
+            int starIdx = patchedGGA.indexOf('*');
+            String body = (starIdx != -1) ? patchedGGA.substring(1, starIdx) : patchedGGA.substring(1);
+            uint8_t checksum = 0;
+            for (size_t i = 0; i < body.length(); i++) checksum ^= body[i];
+            String out = patchedGGA;
+            if (starIdx != -1) {
+              out = patchedGGA.substring(0, starIdx + 1);
+            } else {
+              out += "*";
+            }
+            if (checksum < 16) out += "0";
+            out += String(checksum, HEX);
+            // If the original had \r\n, preserve it
+            if (nmeaLine.endsWith("\r\n")) out += "\r\n";
+            else if (nmeaLine.endsWith("\n")) out += "\n";
+            else if (nmeaLine.endsWith("\r")) out += "\r";
+            latestGGA = out;
+          }
+          else if (type == "RMC") latestRMC = nmeaLine;
+          else if (type == "GSA") {
+            // Simply store the most recent GSA message
+            // We'll convert it to $GPGSA if needed
+            if (nmeaLine.startsWith("$")) {
+              if (!nmeaLine.startsWith("$GP")) {
+                // No longer converting talker ID to GP for ICOM compatibility
+                latestGSA = nmeaLine;
+              } else {
+                // Already has GP prefix, just use as is
+                latestGSA = nmeaLine;
+              }
+              
+              // Log that we received a GSA message
+              logMessage("Updated latest GSA message");
+            }
+          }
+        }
+        nmeaLine = "";
+      } else {
+        nmeaLine += c;
+      }
       if (gps.encode(c)) {
         // Debug when a complete sentence is successfully parsed
         static unsigned long lastGPSDebugTime = 0;
         if (millis() - lastGPSDebugTime > 5000) { // Debug GPS data every 5 seconds
           lastGPSDebugTime = millis();
-          
           // Log GPS data status
           String debug = "GPS Data: ";
           debug += "Valid: " + String(gps.location.isValid() ? "Yes" : "No");
@@ -718,7 +782,6 @@ void loop() {
           debug += ", Alt: " + String(gps.altitude.meters(), 1);
           debug += ", Sats: " + String(gps.satellites.value());
           logMessage(debug);
-          
           // Additional debug for backup data handling
           if (radioConfig && radioConfig->isUsingBackupData()) {
             logMessage("Using backup data. Packets may not be processed by TinyGPS++");
@@ -726,11 +789,17 @@ void loop() {
         }
       }
     }
+    // Update charsPerSecond every second
+    if (millis() - lastCharStatsTime > 1000) {
+      charsPerSecond = gpsCharCount;
+      gpsCharCount = 0;
+      lastCharStatsTime = millis();
+    }
     
     // Forward NMEA messages based on configuration
     if (radioConfig != nullptr) {
       // Always forward to radio
-      radioConfig->forwardNMEAToRadio(gps, altitudeCorrection);
+      radioConfig->forwardNMEAToRadio(gps, altitudeCorrection, charsPerSecond);
       
       // If we're using backup data, capture recent messages and feed them to TinyGPS++
       static bool lastBackupStatus = false;

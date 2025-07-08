@@ -7,6 +7,7 @@
 #include "display_world_map.h"
 #include "display_wifi_status.h"
 #include "display_log.h"
+#include "main_globals.h"
 
 // Forward declarations in case headers do not provide them
 void displayGPSStatusOnOLED();
@@ -129,24 +130,5 @@ UIState getCurrentUIState() {
 }
 
 void updateDisplayForCurrentMode() {
-    switch (currentDisplayMode) {
-        case DisplayMode::GPS_STATUS:
-            displayGPSStatusOnOLED();
-            break;
-        case DisplayMode::COMPASS_STATUS:
-            displayCompassStatusOnOLED();
-            break;
-        case DisplayMode::GRAPHIC_COMPASS:
-            displayGraphicCompass();
-            break;
-        case DisplayMode::WORLD_MAP:
-            displayWorldMap();
-            break;
-        case DisplayMode::WIFI_STATUS:
-            displayWiFiStatus();
-            break;
-        default:
-            displayGraphicCompass();
-            break;
-    }
+    // Display functionality is disabled
 } 

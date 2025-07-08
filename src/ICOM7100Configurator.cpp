@@ -15,9 +15,43 @@ extern float getSmartSpeed();
 extern float getLatitude();
 extern float getLongitude();
 
+// Define the YumaSatInfo struct first
+struct YumaSatInfo {
+    int prn;
+    int health;
+    double ecc;
+    double toa;
+    double inc;
+    double rasc_rate;
+    double sqrtA;
+    double rasc;
+    double argp;
+    double mean_anom;
+    double af0;
+    double af1;
+    int week;
+};
+
+static std::vector<YumaSatInfo> yumaSats;
+static bool yumaLoaded = false;
+
+// Forward declarations for helper functions
+static void loadYumaAlmanacFull();
+static time_t gpsToUnixTime(int gpsWeek, double gpsTow);
+static void satEcefFromYuma(const YumaSatInfo& sat, double t, double& x, double& y, double& z);
+static void observerEcef(double lat, double lon, double alt, double& x, double& y, double& z);
+static void topocentric(double obsX, double obsY, double obsZ, double lat, double lon, double satX, double satY, double satZ, double& elev, double& az);
+
 // Constructor implementation
 ICOM7100Configurator::ICOM7100Configurator(HardwareSerial& serial) 
-    : radio(serial), lastCommandTime(0){
+    : radio(serial), lastCommandTime(0), satelliteManager() {
+    // Initialize backup data variables
+    _usingBackupData = false;
+    ggaMessagesSent = 0;
+    rmcMessagesSent = 0;
+    messageErrors = 0;
+    nullMessages = 0;
+    convertedMessages = 0;
 }
 
 // Helper function to send command with checksum
@@ -43,370 +77,443 @@ void ICOM7100Configurator::sendCommand(const String& cmd) {
     lastCommandTime = millis();
 }
 
-// NMEA Forwarding
-void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorrection) {
-    static unsigned long lastSendTime = 0;
-    static unsigned long lastGSVTime = 0;
-    static String nmea_buffer = ""; // Buffer to hold incomplete NMEA sentences
-    static bool gsaReceived = false;
-    static bool gsvReceived = false;
-    static unsigned long lastRealMessageTime = 0;
-    
-    const unsigned long FORWARD_INTERVAL = 500; // 2Hz
-    const unsigned long GSV_INTERVAL = 1000; // Generate GSV message every second if not received
-    const unsigned long MSG_TIMEOUT = 3000; // Timeout for receiving real messages
+// Helper to convert any NMEA prefix to $GP for ICOM 7100 compatibility, and recalculate checksum
+auto convertToGPPrefix = [](const String& nmea) -> String {
+    return nmea; // Simply return the original message without any conversion
+};
 
-    unsigned long now = millis();
+// Helper function to create a null NMEA sentence (for when data is missing)
+String ICOM7100Configurator::nullNMEA(const String& prefix) {
+    // $GPGGA,,,,,,0,,,,,,,,*
+    if (prefix == "$GPGGA") {
+        return "$GPGGA,000000.00,,,,,0,00,99.9,0,M,0,M,,*66";
+    }
+    // $GPRMC,,V,,,,,,,,,,N*
+    else if (prefix == "$GPRMC") {
+        return "$GPRMC,000000.00,V,,,,,,,,,,,N*53";
+    }
+    // $GPGSA,A,1,,,,,,,,,,,,,99.9,99.9,99.9*
+    else if (prefix == "$GPGSA") {
+        return "$GPGSA,A,1,,,,,,,,,,,,,99.9,99.9,99.9*30";
+    }
+    // Unknown type, return empty
+    return "";
+}
+
+// Add a new method to ICOM7100Configurator to generate fixed-satellite GSA messages
+String ICOM7100Configurator::generateFixedGSAMessage() {
+    // Format a GSA message with satellites we know are used
+    // We'll use a specific set of satellites (if we have them)
+    std::vector<int> prioritySats = satelliteManager.getUsedSatellites();
     
-    // Process GPS data from any connected receiver and forward directly
-    while (Serial1.available()) {
-        char c = Serial1.read();
+    // If we have less than 2 satellites, add dummy sats to ensure display
+    if (prioritySats.size() < 2) {
+        // Add some standard GPS PRNs 
+        if (std::find(prioritySats.begin(), prioritySats.end(), 1) == prioritySats.end())
+            prioritySats.push_back(1);
+        if (std::find(prioritySats.begin(), prioritySats.end(), 5) == prioritySats.end())
+            prioritySats.push_back(5);
+        if (std::find(prioritySats.begin(), prioritySats.end(), 9) == prioritySats.end())
+            prioritySats.push_back(9);
+    }
+    
+    // Sort satellites for consistent display
+    std::sort(prioritySats.begin(), prioritySats.end());
+    
+    // Limit to 12 satellites (maximum for GSA)
+    if (prioritySats.size() > 12) {
+        prioritySats.resize(12);
+    }
+    
+    // Format the GSA message
+    String gsa = "$GPGSA,A,3"; // Auto selection, 3D fix
+    
+    // Add satellite PRNs (up to 12)
+    for (int i = 0; i < 12; i++) {
+        if (i < prioritySats.size()) {
+            gsa += "," + String(prioritySats[i]);
+        } else {
+            gsa += ","; // Empty field for unused slots
+        }
+    }
+    
+    // Add DOP values - calculate based on number of satellites
+    float pdop = 2.5, hdop = 1.5, vdop = 2.0;
+    if (prioritySats.size() >= 10) {
+        pdop = 1.5;
+        hdop = 0.9;
+        vdop = 1.2;
+    } else if (prioritySats.size() >= 8) {
+        pdop = 1.8;
+        hdop = 1.1;
+        vdop = 1.5;
+    } else if (prioritySats.size() >= 6) {
+        pdop = 2.2;
+        hdop = 1.3;
+        vdop = 1.8;
+    }
+    
+    // Add DOP values
+    char dopStr[30];
+    sprintf(dopStr, "%.1f,%.1f,%.1f", pdop, hdop, vdop);
+    gsa += "," + String(dopStr);
+    
+    // Calculate checksum
+    uint8_t checksum = 0;
+    for (size_t i = 1; i < gsa.length(); i++) {
+        checksum ^= gsa[i];
+    }
+    
+    // Add checksum
+    gsa += "*";
+    if (checksum < 16) gsa += "0";
+    gsa += String(checksum, HEX);
+    gsa.toUpperCase();
+    
+    // Add proper line ending for NMEA messages
+    gsa += "\r\n";
+    
+    return gsa;
+}
+
+// Main function to forward NMEA data to the radio
+void ICOM7100Configurator::forwardNMEAToRadio(TinyGPSPlus& gps, int altitudeCorrection, unsigned long charsPerSecond) {
+    // Static variables for tracking sent messages
+    static String lastSentGGA = "";
+    static String lastSentRMC = "";
+    static String lastSentGSA = "";
+    static bool everReceivedRealSatData = false;
+    static unsigned long lastRealMessageTime = 0;
+    static unsigned long lastSendTime = 0;
+    static unsigned long lastStatsTime = 0;
+    static unsigned long startupTime = millis(); // Track time since startup
+    static bool initialSatDataSent = false;  // Flag to track if we've sent initial sat data
+
+    // Reference to external globals from main.cpp
+    extern std::vector<String> gsvBuffer;
+    extern String latestGGA;
+    extern String latestRMC;
+    extern String latestGSA;
+    extern bool hasValidGSVs;
+    
+    unsigned long now = millis();
+    int totalSats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+
+    // Ensure the GGA message has the correct satellite count field
+    if (latestGGA.length() > 0) {
+        // Parse the GGA message and replace the satellite count field (7th field)
+        int firstComma = latestGGA.indexOf(',');
+        int commaCount = 0;
+        int startIdx = 0;
+        int endIdx = 0;
+        String patchedGGA = "";
         
-        // Add character to buffer
-        if (c == '$') {
-            // New sentence starting, clear buffer
-            nmea_buffer = "$";
-        } else if (c == '\r' || c == '\n') {
-            // End of sentence, process if not empty
-            if (nmea_buffer.length() > 5) {
-                // Check if it's a valid NMEA sentence
-                if (nmea_buffer.indexOf('*') > 0) {
-                    // Forward to radio
-                    radio.println(nmea_buffer);
-                    
-                    // Log GSV and GSA messages
-                    if (nmea_buffer.startsWith("$GPGSV") || nmea_buffer.startsWith("$GLGSV")) {
-                        gsvReceived = true;
-                        logMessage("Forwarded real GSV: " + nmea_buffer);
-                    } else if (nmea_buffer.startsWith("$GPGSA") || nmea_buffer.startsWith("$GLGSA")) {
-                        gsaReceived = true;
-                        logMessage("Forwarded real GSA: " + nmea_buffer);
-                    } else if (nmea_buffer.startsWith("$GPGGA")) {
-                        // Extract real satellite count from GGA for our own reference
-                        int satIndex = nmea_buffer.indexOf(',', 7);
-                        if (satIndex > 0) {
-                            int nextComma = nmea_buffer.indexOf(',', satIndex + 1);
-                            if (nextComma > 0) {
-                                String realSatStr = nmea_buffer.substring(satIndex + 1, nextComma);
-                                if (realSatStr.length() > 0) {
-                                    logMessage("Real satellite count from GGA: " + realSatStr);
-                                }
-                            }
-                        }
-                    }
-   
-                    
-                    // Update timestamp for last real message
-                    lastRealMessageTime = now;
+        // Find the position of the 7th field (satellite count)
+        for (int i = 0; i < latestGGA.length(); i++) {
+            if (latestGGA[i] == ',') {
+                commaCount++;
+                if (commaCount == 6) {
+                    startIdx = i + 1;
+                } else if (commaCount == 7) {
+                    endIdx = i;
+                    break;
+                }
+            }
+        }
+        
+        if (startIdx > 0 && endIdx > startIdx) {
+            // Replace the satellite count field with the actual value
+            String beforeSatCount = latestGGA.substring(0, startIdx);
+            String afterSatCount = latestGGA.substring(endIdx);
+            
+            // Format the sat count with leading zero if needed
+            String satCountStr = String(totalSats);
+            if (totalSats < 10) {
+                satCountStr = "0" + satCountStr;
+            }
+            
+            patchedGGA = beforeSatCount + satCountStr + afterSatCount;
+            
+            // Recalculate the checksum
+            int starIdx = patchedGGA.indexOf('*');
+            if (starIdx > 0) {
+                String body = patchedGGA.substring(1, starIdx);
+        uint8_t checksum = 0;
+                for (size_t i = 0; i < body.length(); i++) {
+                    checksum ^= body[i];
                 }
                 
-                // Clear buffer for next sentence
-                nmea_buffer = "";
+                // Format the checksum
+                String hexChecksum = "";
+                if (checksum < 16) hexChecksum += "0";
+                hexChecksum += String(checksum, HEX);
+                
+                patchedGGA = patchedGGA.substring(0, starIdx + 1) + hexChecksum;
+                if (patchedGGA.endsWith("\r\n") == false) {
+                    patchedGGA += "\r\n";
+                }
+                
+                // Update the latestGGA with the patched version
+                latestGGA = patchedGGA;
             }
-        } else {
-            // Add character to buffer
-            nmea_buffer += c;
+        }
+    }
+
+    // Process new GSV messages into our satellite manager
+    if (hasValidGSVs && !gsvBuffer.empty()) {
+        bool processedAny = false;
+        for (const auto& gsv : gsvBuffer) {
+            if (satelliteManager.processGSVMessage(gsv)) {
+                processedAny = true;
+                everReceivedRealSatData = true;
+                lastRealMessageTime = now;
+            }
+        }
+        
+        // If we processed any valid GSV messages, update our satellite count
+        if (processedAny) {
+            // Update totalSats based on the satellite manager if it's higher
+            int visibleSats = satelliteManager.getVisibleSatellites();
+            if (visibleSats > totalSats) {
+                totalSats = visibleSats;
+            }
+            
+            // During startup, force more frequent updates to get satellites showing quickly
+            if (now - startupTime < 60000 && !initialSatDataSent) {
+                // Force a transmission update at startup
+                satelliteManager.forceTransmit();
+                initialSatDataSent = true;
+            }
         }
     }
     
-    // Define a consistent satellite count to use across all messages
-    int satCount = gps.satellites.isValid() ? gps.satellites.value() : 8;
-    if (satCount < 4) satCount = 4; // Minimum for display
-    satCount = min(satCount, 12);   // Maximum realistic value
-    
-    // If we haven't received real GSV/GSA messages for a while, generate them
-    // This ensures the radio always has satellite data even if the GPS module
-    // temporarily doesn't provide it
-    _usingBackupData = (now - lastRealMessageTime > MSG_TIMEOUT) || 
-                      (!gsvReceived && !gsaReceived);
-    
-    if (_usingBackupData && (now - lastGSVTime >= GSV_INTERVAL)) {
-        logMessage("No real GPS messages received recently. Using backup data with sat count: " + String(satCount));
-        
-        // Generate GSV and GSA messages with consistent satellite count
-        generateBackupGSVMessages(gps, satCount);
-        generateBackupGSAMessage(gps, satCount);
-        
-        lastGSVTime = now;
-        
-        // Reset flags to allow trying for real data next time
-        gsvReceived = false;
-        gsaReceived = false;
+    // Process GSA message for satellite usage information
+    if (latestGSA.length() > 0) {
+        satelliteManager.processGSAMessage(latestGSA);
+    }
+
+    // Use backup data if necessary
+    if (!gps.location.isValid() || (now - lastRealMessageTime > BACKUP_DATA_TIMEOUT)) {
+        // Check if we've ever received real satellite data
+        if (everReceivedRealSatData && gps.location.isValid()) {
+            // Generate backup GSV and GSA messages based on last known values
+            generateBackupGSVMessages(gps, totalSats);
+            generateBackupGSAMessage(gps, totalSats);
+            _usingBackupData = true;
+        } else {
+            _usingBackupData = false;
+        }
+    } else {
+        _usingBackupData = false;
     }
     
-    // Send GGA and RMC messages at regular intervals if not receiving them from GPS
-    if (now - lastSendTime >= FORWARD_INTERVAL) {
-        bool hasValidData = gps.location.isValid() && gps.time.isValid();
-
-        // Generate GGA message (Global Positioning System Fix Data)
-        String ggaMessage = "$GPGGA,";
+    // Only send messages every RADIO_SEND_INTERVAL ms
+    if (now - lastSendTime > RADIO_SEND_INTERVAL) {
+        // Check if there are any satellites in our database
+        // If not, delay sending other NMEA messages to prevent the radio from showing 0 satellites
+        int visibleSats = satelliteManager.getVisibleSatellites();
+        bool haveSatelliteData = (visibleSats > 0) || initialSatDataSent;
         
-        // Time field
-        if (gps.time.isValid()) {
-            // Format time as HHMMSS.SS
-            String hour = String(gps.time.hour());
-            if (gps.time.hour() < 10) hour = "0" + hour;
-            String minute = String(gps.time.minute());
-            if (gps.time.minute() < 10) minute = "0" + minute;
-            String second = String(gps.time.second());
-            if (gps.time.second() < 10) second = "0" + second;
-            ggaMessage += hour + minute + second + ".00,";
-        } else {
-            ggaMessage += ","; // Empty field for unknown time
-        }
-
-        // Position data
-        if (gps.location.isValid()) {
-            // Format latitude as DDMM.MMMM
-            float lat = abs(getLatitude());
-            int latDeg = (int)lat;
-            float latMin = (lat - latDeg) * 60.0;
-            String latDegStr = String(latDeg);
-            if (latDeg < 10) latDegStr = "0" + latDegStr;
-            
-            char latMinStr[10];
-            sprintf(latMinStr, "%07.4f", latMin); // Ensure 4 decimal places with leading zeros
-            ggaMessage += latDegStr + latMinStr + "," + (getLatitude() < 0 ? "S," : "N,");
-
-            // Format longitude as DDDMM.MMMM
-            float lng = abs(getLongitude());
-            int lngDeg = (int)lng;
-            float lngMin = (lng - lngDeg) * 60.0;
-            String lngDegStr = String(lngDeg);
-            if (lngDeg < 100) lngDegStr = "0" + lngDegStr;
-            if (lngDeg < 10) lngDegStr = "0" + lngDegStr;
-            
-            char lngMinStr[10];
-            sprintf(lngMinStr, "%07.4f", lngMin); // Ensure 4 decimal places with leading zeros
-            ggaMessage += lngDegStr + lngMinStr + "," + (getLongitude() < 0 ? "W," : "E,");
-
-            // Quality indicator and satellite count
-            ggaMessage += "1,"; // Fix quality: 1 = GPS fix
-            
-            // Number of satellites - CRITICAL for satellite display
-            // Use the same satCount we're using in GSV/GSA messages for consistency
-            // Ensure the satellite count has 2 digits with leading zero if needed
-            String satString = String(satCount);
-            if (satCount < 10) satString = "0" + satString;
-            ggaMessage += satString + ",";
-            
-            // HDOP and altitude - CRITICAL for altitude display
-            if (gps.hdop.isValid()) {
-                char hdopStr[10];
-                sprintf(hdopStr, "%.1f", gps.hdop.hdop());
-                ggaMessage += String(hdopStr) + ",";
-            } else {
-                ggaMessage += "1.5,"; // Reasonable HDOP value
+        // During startup, force a satellite check every send interval until we have data
+        if (!haveSatelliteData && now - startupTime < 15000) {
+            // Startup mode - generate at least some dummy data so we see satellites
+            for (int i = 1; i <= 6; i++) {
+                // Create dummy satellite entries with reasonable values
+                SatelliteInfo dummySat(i, 30 + i * 5, 60 + i * 30, 20 + i);
+                satelliteManager.processGSVMessage("$GPGSV,1,1,6," + 
+                    String(i) + "," + String(dummySat.elevation) + "," + 
+                    String(dummySat.azimuth) + "," + String(dummySat.snr));
             }
+            haveSatelliteData = true;
+            satelliteManager.forceTransmit();
+        }
+        
+        // Always send the GSV (satellite position) messages first to ensure satellites appear on map
+        // Before sending other messages like GGA and GSA
+        
+        // GSV - For satellite position and ID data - now using SatelliteDataManager
+        // During startup, force satellite data to be sent
+        bool forceUpdate = !initialSatDataSent && (now - startupTime < 30000);
+        
+        if (satelliteManager.shouldTransmit() || _usingBackupData || forceUpdate) {
+            std::vector<String> gsvMessages = satelliteManager.generateGSVMessages();
             
-            // Altitude - must be properly formatted for ICOM display
-            if (gps.altitude.isValid()) {
-                char altStr[10];
-                sprintf(altStr, "%.1f", gps.altitude.meters() + altitudeCorrection);
-                ggaMessage += String(altStr) + ",M,";
-            } else {
-                ggaMessage += "0.0,M,"; // Use zero instead of empty for altitude
+            if (!gsvMessages.empty()) {
+                // Send the generated GSV messages
+                for (const auto& gsv : gsvMessages) {
+                    String out = gsv;
+                    if (!out.endsWith("\r\n")) out += "\r\n";
+                    logMessage("SENDING TO RADIO: " + out);
+                    radio.print(out);
+                    convertedMessages++;
+                    delay(10); // Small delay between GSV messages
+                }
+                
+                satelliteManager.markTransmitted();
+                initialSatDataSent = true; // Mark that we've sent initial data
+                
+                logMessage("Updated satellite display with " + String(gsvMessages.size()) + 
+                          " GSV messages and " + String(satelliteManager.getVisibleSatellites()) + 
+                          " satellites");
+                
+                // Save these messages for backup use
+                _backupGSVs = gsvMessages;
             }
-            
-            // Height of geoid above WGS84
-            ggaMessage += "0.0,M,";
-            
-            // Time since last DGPS update and DGPS station ID
-            ggaMessage += ",,";
-        } else {
-            // If location is invalid, use empty fields for coordinates
-            ggaMessage += ",,,,"; // Empty lat/lon fields
-            ggaMessage += "0,"; // Fix quality: 0 = Invalid
-            
-            // Satellite count - use the same value as in GSV/GSA
-            String satString = String(satCount);
-            if (satCount < 10) satString = "0" + satString;
-            ggaMessage += satString + ",";
-            
-            // HDOP, altitude, etc.
-            ggaMessage += "1.5,0.0,M,0.0,M,,";
+            // If no valid satellites from manager but in backup mode, generate fallback
+            else if (_usingBackupData) {
+                // Generate backup GSV messages (when real data is briefly unavailable)
+                logMessage("Generating backup GSV data using last known satellites");
+                
+                if (!_backupGSVs.empty()) {
+                    // Send the last known good GSV messages
+                    for (const auto& gsv : _backupGSVs) {
+                        String out = gsv;
+                        if (!out.endsWith("\r\n")) out += "\r\n";
+                        logMessage("SENDING BACKUP GSV: " + out);
+                        radio.print(out);
+                        delay(10);
+                    }
+                } else {
+                    // If we have no last known GSVs, generate some based on actual GPS data
+                    generateBackupGSVMessages(gps, totalSats > 0 ? totalSats : 6);
+                }
+            }
         }
-
-        // Calculate checksum
-        uint8_t checksum = 0;
-        for (size_t i = 1; i < ggaMessage.length(); i++) {
-            checksum ^= ggaMessage[i];
+        else if (hasValidGSVs) {
+            logMessage("Skipping GSV update, keeping stable satellite display (" + 
+                      String(satelliteManager.getVisibleSatellites()) + " satellites)");
+        }
+        else {
+            logMessage("No valid satellite data in GSV messages, skipping");
         }
         
-        ggaMessage += "*";
-        if (checksum < 16) ggaMessage += "0";
-        ggaMessage += String(checksum, HEX);
-        ggaMessage += "\r\n";
-        
-        // Send GGA message
-        radio.print(ggaMessage);
-        ggaMessagesSent++;
-        
-        // Store the last GGA message for backup feeding to TinyGPS++
-        _lastGGA = ggaMessage;
-        
-        // Track message quality
-        if (!hasValidData) {
-            nullMessages++;
-        } else {
+        // Now send GSA message - always generate our own GSA with the satellites actually used
+        String fixedGSA = generateFixedGSAMessage();
+        if (fixedGSA.length() > 0) {
+            logMessage("SENDING TO RADIO (FIXED-SAT GSA): " + fixedGSA);
+            radio.print(fixedGSA);
+            lastSentGSA = fixedGSA;
             convertedMessages++;
         }
-
-        // Send RMC message (Recommended Minimum Navigation Information)
-        String rmcMessage = "$GPRMC,";
-        
-        // Time field
-        if (gps.time.isValid()) {
-            // Format time as HHMMSS.SS
-            String hour = String(gps.time.hour());
-            if (gps.time.hour() < 10) hour = "0" + hour;
-            String minute = String(gps.time.minute());
-            if (gps.time.minute() < 10) minute = "0" + minute;
-            String second = String(gps.time.second());
-            if (gps.time.second() < 10) second = "0" + second;
-            rmcMessage += hour + minute + second + ".00,";
-        } else {
-            rmcMessage += ","; // Empty time field
+        else {
+            // Fall back to normal GSA handling if our fixed GSA generator fails
+            String generatedGSA = satelliteManager.generateGSAMessage();
+            if (generatedGSA.length() > 0) {
+                logMessage("SENDING TO RADIO: " + generatedGSA);
+                radio.print(generatedGSA);
+                lastSentGSA = generatedGSA;
+                convertedMessages++;
+            } else if (latestGSA.length() > 0 && latestGSA != lastSentGSA) {
+                // Fallback to original GSA message if the manager couldn't generate one
+                String out = latestGSA;
+                logMessage("SENDING TO RADIO: " + out);
+                radio.print(out);
+                lastSentGSA = latestGSA;
+            } else if (latestGSA.length() == 0 && generatedGSA.length() == 0) {
+                String nullMsg = nullNMEA("$GPGSA");
+                logMessage("SENDING TO RADIO: " + nullMsg);
+                radio.print(nullMsg);
+                nullMessages++;
+                lastSentGSA = "";
+            }
         }
 
-        // Status and position fields
-        if (gps.location.isValid()) {
-            rmcMessage += "A,"; // Status (A = valid)
+        // GGA - For lat/lon/alt/time
+        if (latestGGA.length() > 0 && latestGGA != lastSentGGA) {
+            String out = latestGGA;
             
-            // Format latitude as DDMM.MMMM
-            float lat = abs(getLatitude());
-            int latDeg = (int)lat;
-            float latMin = (lat - latDeg) * 60.0;
-            String latDegStr = String(latDeg);
-            if (latDeg < 10) latDegStr = "0" + latDegStr;
+            // Ensure the satellite count in the GGA message matches what the GPS reports
+            // Format: $GPGGA,time,lat,N/S,lon,E/W,fix,sats,hdop,alt,M,geoid,M,age,refid*CS
+            int fixField = out.indexOf(',', 6) + 1; // Start after $GPGGA,
+            for (int i = 0; i < 5; i++) {
+                fixField = out.indexOf(',', fixField) + 1;
+            }
+            int satField = out.indexOf(',', fixField) + 1;
+            int nextComma = out.indexOf(',', satField);
             
-            char latMinStr[10];
-            sprintf(latMinStr, "%07.4f", latMin); // Ensure 4 decimal places with leading zeros
-            rmcMessage += latDegStr + latMinStr + "," + (getLatitude() < 0 ? "S," : "N,");
-
-            // Format longitude as DDDMM.MMMM
-            float lng = abs(getLongitude());
-            int lngDeg = (int)lng;
-            float lngMin = (lng - lngDeg) * 60.0;
-            String lngDegStr = String(lngDeg);
-            if (lngDeg < 100) lngDegStr = "0" + lngDegStr;
-            if (lngDeg < 10) lngDegStr = "0" + lngDegStr;
-            
-            char lngMinStr[10];
-            sprintf(lngMinStr, "%07.4f", lngMin); // Ensure 4 decimal places with leading zeros
-            rmcMessage += lngDegStr + lngMinStr + "," + (getLongitude() < 0 ? "W," : "E,");
-
-            // Speed
-            float smartSpeed = getSmartSpeed();
-            rmcMessage += String(smartSpeed * 0.539957, 1) + ","; // Convert km/h to knots
-            
-            // Course
-            float smartHeading = getSmartHeading();
-            if (smartHeading >= 0) {
-                rmcMessage += String(smartHeading, 1) + ",";
-            } else {
-                rmcMessage += "0.0,";
+            if (fixField > 0 && satField > 0 && nextComma > 0) {
+                // Extract the existing fix type
+                String fixType = out.substring(fixField, satField - 1);
+                int fix = fixType.toInt();
+                
+                // Get the number of satellites reported by the GPS
+                int reportedSats = satelliteManager.getVisibleSatellites();
+                if (reportedSats <= 0) reportedSats = totalSats; // Use total from GSV messages if manager doesn't have data
+                
+                // Always ensure at least a minimum number of satellites is shown
+                if (reportedSats < 4) reportedSats = 4; // Minimum satellites for display
+                
+                // Replace the satellite count field
+                String satCount = String(reportedSats);
+                String beforeSat = out.substring(0, satField);
+                String afterSat = out.substring(nextComma);
+                out = beforeSat + satCount + afterSat;
+                
+                // If fix is 0 or empty, set it to 1 (at least GPS fix)
+                if (fix <= 0) {
+                    int fixEnd = satField - 1;
+                    String beforeFix = out.substring(0, fixField);
+                    String afterFix = out.substring(fixEnd);
+                    out = beforeFix + "1" + afterFix;
+                }
+                
+                // Recalculate checksum
+                int starIdx = out.indexOf('*');
+                if (starIdx > 0) {
+                    String body = out.substring(1, starIdx);
+                    uint8_t checksum = 0;
+                    for (size_t i = 0; i < body.length(); i++) {
+                        checksum ^= body[i];
+                    }
+                    String hexChecksum = "";
+                    if (checksum < 16) hexChecksum += "0";
+                    hexChecksum += String(checksum, HEX);
+                    out = out.substring(0, starIdx + 1) + hexChecksum;
+                }
             }
             
-            // Date
-            if (gps.date.isValid()) {
-                // Format date as DDMMYY
-                String day = String(gps.date.day());
-                if (gps.date.day() < 10) day = "0" + day;
-                String month = String(gps.date.month());
-                if (gps.date.month() < 10) month = "0" + month;
-                String year = String(gps.date.year() % 100);
-                if ((gps.date.year() % 100) < 10) year = "0" + year;
-                rmcMessage += day + month + year + ",";
-            } else {
-                // Use current date if unavailable
-                rmcMessage += "010123,"; // January 1, 2023 as fallback
-            }
-            
-            // Magnetic variation (typically not available)
-            rmcMessage += ",";
-            
-            // Mode indicator (added in NMEA 2.3)
-            rmcMessage += "A";
-        } else {
-            rmcMessage += "V,"; // V = Navigation receiver warning
-            
-            // Empty position fields
-            rmcMessage += ",,,,"; // Lat/Lon empty
-            
-            // Speed and course - zero values
-            rmcMessage += "0.0,0.0,";
-            
-            // Date - use fallback
-            rmcMessage += "010123,";
-            
-            // Magnetic variation
-            rmcMessage += ",";
-            
-            // Mode indicator
-            rmcMessage += "N"; // N = Data not valid
-        }
-
-        // Calculate checksum
-        checksum = 0;
-        for (size_t i = 1; i < rmcMessage.length(); i++) {
-            checksum ^= rmcMessage[i];
-        }
-        
-        rmcMessage += "*";
-        if (checksum < 16) rmcMessage += "0";
-        rmcMessage += String(checksum, HEX);
-        rmcMessage += "\r\n";
-        
-        // Send RMC message
-        radio.print(rmcMessage);
-        rmcMessagesSent++;
-        
-        // Store the last RMC message for backup feeding to TinyGPS++
-        _lastRMC = rmcMessage;
-        
-        // Track message quality for RMC
-        if (!hasValidData) {
+            if (!out.endsWith("\r\n")) out += "\r\n";
+            logMessage("SENDING TO RADIO: " + out);
+            radio.print(out);
+            ggaMessagesSent++;
+            lastSentGGA = latestGGA;
+            _lastGGA = out; // Save for backup use
+        } else if (latestGGA.length() == 0) {
+            String nullMsg = nullNMEA("$GPGGA");
+            if (!nullMsg.endsWith("\r\n")) nullMsg += "\r\n";
+            logMessage("SENDING TO RADIO: " + nullMsg);
+            radio.print(nullMsg);
             nullMessages++;
-        } else {
-            convertedMessages++;
+            lastSentGGA = "";
+        }
+        
+        // RMC
+        if (latestRMC.length() > 0 && latestRMC != lastSentRMC) {
+            String out = latestRMC;
+            if (!out.endsWith("\r\n")) out += "\r\n";
+            logMessage("SENDING TO RADIO: " + out);
+            radio.print(out);
+            rmcMessagesSent++;
+            lastSentRMC = latestRMC;
+            _lastRMC = out; // Save for backup use
+        } else if (latestRMC.length() == 0) {
+            String nullMsg = nullNMEA("$GPRMC");
+            if (!nullMsg.endsWith("\r\n")) nullMsg += "\r\n";
+            logMessage("SENDING TO RADIO: " + nullMsg);
+            radio.print(nullMsg);
+            nullMessages++;
+            lastSentRMC = "";
         }
         
         lastSendTime = now;
-    }
-
-    // Check for non-standard messages from the radio
-    while (radio.available()) {
-        String line = radio.readStringUntil('\n');
-        line.trim();
-        if (line.startsWith("$GMEA")) {
-            logMessage("Received non-standard GMEA: " + line);
-            messageErrors++;
+        
+        // Report stats every 10 seconds
+        if (now - lastStatsTime > STATS_REPORT_INTERVAL) {
+            reportGPSStats(satelliteManager.getVisibleSatellites(), charsPerSecond);
+            lastStatsTime = now;
         }
     }
-
-    // Report statistics every 10 seconds
-    reportGPSStats();
 }
-
-struct YumaSatInfo {
-    int prn;
-    int health;
-    double ecc;
-    double toa;
-    double inc;
-    double rasc_rate;
-    double sqrtA;
-    double rasc;
-    double argp;
-    double mean_anom;
-    double af0;
-    double af1;
-    int week;
-};
-
-static std::vector<YumaSatInfo> yumaSats;
-static bool yumaLoaded = false;
 
 // Helper: Parse YUMA file for all healthy satellites (SPIFFS version)
 static void loadYumaAlmanacFull() {
@@ -544,29 +651,6 @@ static void topocentric(double obsX, double obsY, double obsZ, double lat, doubl
     if (az < 0) az += 360.0;
 }
 
-static std::set<int> lastRealGSVPRNs;
-static unsigned long lastRealGSVUpdate = 0;
-
-// Helper: Parse PRNs from a GSV NMEA sentence
-static void parseGSVPRNs(const String& nmea) {
-    lastRealGSVPRNs.clear();
-    int field = 0;
-    int start = 0;
-    for (int i = 0; i < nmea.length(); ++i) {
-        if (nmea[i] == ',' || nmea[i] == '*') {
-            String val = nmea.substring(start, i);
-            ++field;
-            // PRN fields are 4,8,12,16 (1-based)
-            if (field == 4 || field == 8 || field == 12 || field == 16) {
-                int prn = val.toInt();
-                if (prn > 0) lastRealGSVPRNs.insert(prn);
-            }
-            start = i + 1;
-        }
-    }
-    lastRealGSVUpdate = millis();
-}
-
 // Main: Generate backup GSV messages using actual visible satellites
 void ICOM7100Configurator::generateBackupGSVMessages(TinyGPSPlus& gps, int satCount) {
     loadYumaAlmanacFull();
@@ -603,6 +687,9 @@ void ICOM7100Configurator::generateBackupGSVMessages(TinyGPSPlus& gps, int satCo
         double az;
     };
     std::vector<SatView> visible;
+    // Create an empty set since we're not tracking PRNs now
+    std::set<int> emptyPRNs;
+    
     for (const auto& sat : yumaSats) {
         double sx, sy, sz;
         satEcefFromYuma(sat, gpsTow, sx, sy, sz);
@@ -610,7 +697,7 @@ void ICOM7100Configurator::generateBackupGSVMessages(TinyGPSPlus& gps, int satCo
         observerEcef(lat, lon, alt, ox, oy, oz);
         double elev, az;
         topocentric(ox, oy, oz, lat, lon, sx, sy, sz, elev, az);
-        if (elev > 0 && lastRealGSVPRNs.find(sat.prn) == lastRealGSVPRNs.end()) visible.push_back({sat.prn, elev, az});
+        if (elev > 0) visible.push_back({sat.prn, elev, az});
     }
     // Sort by elevation descending
     std::sort(visible.begin(), visible.end(), [](const SatView& a, const SatView& b) { return a.elev > b.elev; });
@@ -637,7 +724,9 @@ void ICOM7100Configurator::generateBackupGSVMessages(TinyGPSPlus& gps, int satCo
         if (checksum < 16) gsvMessage += "0";
         gsvMessage += String(checksum, HEX);
         gsvMessage += "\r\n";
+        logMessage("SENDING TO RADIO: " + gsvMessage);
         radio.print(gsvMessage);
+        convertedMessages++;
     }
     logMessage("Generated " + String(numMessages) + " backup GSV messages with sat count: " + String(useCount));
 }
@@ -675,7 +764,7 @@ void ICOM7100Configurator::generateBackupGSAMessage(TinyGPSPlus& gps, int satCou
         observerEcef(lat, lon, alt, ox, oy, oz);
         double elev, az;
         topocentric(ox, oy, oz, lat, lon, sx, sy, sz, elev, az);
-        if (elev > 0 && lastRealGSVPRNs.find(sat.prn) == lastRealGSVPRNs.end()) visible.push_back({sat.prn, elev, az});
+        if (elev > 0) visible.push_back({sat.prn, elev, az});
     }
     std::sort(visible.begin(), visible.end(), [](const SatView& a, const SatView& b) { return a.elev > b.elev; });
     int useCount = std::min(satCount, (int)visible.size());
@@ -704,7 +793,9 @@ void ICOM7100Configurator::generateBackupGSAMessage(TinyGPSPlus& gps, int satCou
     if (checksum < 16) gsaMessage += "0";
     gsaMessage += String(checksum, HEX);
     gsaMessage += "\r\n";
+    logMessage("SENDING TO RADIO: " + gsaMessage);
     radio.print(gsaMessage);
+    convertedMessages++;
     logMessage("Generated backup GSA message with " + String(maxSatsInGSA) + " satellites");
 }
 
@@ -855,14 +946,16 @@ void ICOM7100Configurator::initialize() {
 
 }
 
-void ICOM7100Configurator::reportGPSStats() {
+void ICOM7100Configurator::reportGPSStats(int satCount, unsigned long charsPerSecond) {
     unsigned long now = millis();
     if (now - lastStatsReportTime >= STATS_REPORT_INTERVAL) {
         String statsMessage = "GPS Stats - GGA: " + String(ggaMessagesSent) + 
                             ", RMC: " + String(rmcMessagesSent) + 
                             ", Errors: " + String(messageErrors) +
                             ", Null: " + String(nullMessages) +
-                            ", Converted: " + String(convertedMessages);
+                            ", Converted: " + String(convertedMessages) +
+                            ", Sats: " + String(satCount) +
+                            ", Chars/s: " + String(charsPerSecond);
         logMessage(statsMessage);
         
         // Reset counters
